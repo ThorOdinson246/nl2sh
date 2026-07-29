@@ -60,6 +60,16 @@ def parse_args():
     ap.add_argument("--save_strategy", default="steps")
     ap.add_argument("--save_steps", type=int, default=200)
     ap.add_argument("--save_total_limit", type=int, default=3)
+    # Without this, save_total_limit silently deletes the BEST checkpoint.
+    # Observed in job 571854: eval_loss bottomed at epoch ~0.96 (1.3141) then
+    # rose steadily for 10+ consecutive evals -- classic overfitting onset at
+    # ~1 epoch. With 3 epochs x ~3,330 steps/epoch, save_steps=200 and
+    # save_total_limit=3, only steps ~9,591-9,991 would have survived: all
+    # deep into the overfit region, with the good checkpoint (step ~3,330)
+    # long since pruned. HF Trainer exempts the best checkpoint from
+    # save_total_limit pruning when load_best_model_at_end is set.
+    ap.add_argument("--load_best_model_at_end", type=lambda x: x.lower() == "true", default=True)
+    ap.add_argument("--metric_for_best_model", default="eval_loss")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--report_to", default="none")
     return ap.parse_args()
@@ -126,6 +136,9 @@ def main():
         save_strategy=args.save_strategy,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        load_best_model_at_end=args.load_best_model_at_end,
+        metric_for_best_model=args.metric_for_best_model,
+        greater_is_better=False,  # eval_loss: lower is better
         seed=args.seed,
         report_to=args.report_to,
         dataset_text_field="text",

@@ -85,7 +85,8 @@ srun $PY $PROJ/train_lora.py \
   --attn_implementation sdpa \
   --max_seq_length 512 \
   --packing False \
-  --num_train_epochs 3 \
+  --num_train_epochs 2 \
+  --load_best_model_at_end True --metric_for_best_model eval_loss \
   --per_device_train_batch_size 16 \
   --gradient_accumulation_steps 2 \
   --learning_rate 2e-4 \
