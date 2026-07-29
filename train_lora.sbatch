@@ -48,11 +48,17 @@ export OMP_NUM_THREADS=16
 # export TRANSFORMERS_OFFLINE=1
 
 MODEL=${MODEL:-Qwen/Qwen2.5-Coder-1.5B-Instruct}
+# Overridable so the real-only baseline and the real+synthetic run can be
+# launched concurrently (gpu003 has 2 A100s, each run needs 1).
+TRAIN_FILE=${TRAIN_FILE:-$PROJ/data/train.jsonl}
+DEV_FILE=${DEV_FILE:-$PROJ/data/dev.jsonl}
 RUN=${SLURM_JOB_NAME}_$(basename "$MODEL")_${SLURM_JOB_ID}
 OUT=$PROJ/runs/$RUN
 mkdir -p "$OUT"
 
 echo "[$(date)] host=$(hostname) job=$SLURM_JOB_ID model=$MODEL"
+echo "[$(date)] train=$TRAIN_FILE ($(wc -l < "$TRAIN_FILE") rows)"
+echo "[$(date)] dev=$DEV_FILE ($(wc -l < "$DEV_FILE") rows)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 $PY -c "import torch;print('torch',torch.__version__,'cuda',torch.cuda.is_available())"
 
@@ -66,8 +72,8 @@ $PY -c "import torch;print('torch',torch.__version__,'cuda',torch.cuda.is_availa
 # masking matters more than the wall-clock savings from packing.
 srun $PY $PROJ/train_lora.py \
   --model_name_or_path "$MODEL" \
-  --train_file  $PROJ/data/train.jsonl \
-  --eval_file   $PROJ/data/dev.jsonl \
+  --train_file  "$TRAIN_FILE" \
+  --eval_file   "$DEV_FILE" \
   --output_dir  "$OUT" \
   --bf16 True \
   --attn_implementation sdpa \
