@@ -9,7 +9,6 @@ downstream tool, which is easy to misdiagnose as a bad fine-tune rather than
 a missing template.
 """
 import argparse
-import shutil
 from pathlib import Path
 
 import torch
@@ -28,7 +27,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"loading base model {args.base} in bf16")
-    base_model = AutoModelForCausalLM.from_pretrained(args.base, dtype=torch.bfloat16)
+    base_model = AutoModelForCausalLM.from_pretrained(args.base, torch_dtype=torch.bfloat16)  # transformers 4.51.3 uses torch_dtype=, not dtype=
 
     print(f"loading adapter from {args.adapter}")
     peft_model = PeftModel.from_pretrained(base_model, args.adapter)

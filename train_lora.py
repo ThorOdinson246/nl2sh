@@ -74,7 +74,7 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        dtype="bfloat16" if args.bf16 else "auto",
+        torch_dtype="bfloat16" if args.bf16 else "auto",  # transformers 4.51.3 uses torch_dtype=, not dtype=
         attn_implementation=args.attn_implementation,
     )
 
