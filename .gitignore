@@ -1,6 +1,7 @@
 data/raw/
 data/interim/
 data/processed/
+data/*.jsonl
 models/
 slurm_outputs/
 venv/
