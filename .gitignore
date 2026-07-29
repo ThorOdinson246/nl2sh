@@ -1,0 +1,9 @@
+data/raw/
+data/interim/
+data/processed/
+models/
+slurm_outputs/
+venv/
+*.gguf
+*.safetensors
+__pycache__/
