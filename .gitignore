@@ -2,6 +2,7 @@ data/raw/
 data/interim/
 data/processed/
 data/*.jsonl
+data/smoke/
 models/
 slurm_outputs/
 venv/
