@@ -4,6 +4,9 @@ data/processed/
 models/
 slurm_outputs/
 venv/
+venv_teacher/
+venv_*/
+runs/
 *.gguf
 *.safetensors
 __pycache__/
