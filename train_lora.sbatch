@@ -18,7 +18,13 @@
 #SBATCH --nodelist=gpu003
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+# 64G, not 128G: gpu003 has 257G total, so two concurrent 128G jobs cannot
+# both fit and the second blocks on Reason=Resources -- which is exactly what
+# happened when the two training arms were first submitted together. LoRA on
+# a 1.5B model does not need anywhere near 128G (the smoke test ran in 32G).
+# Requesting more than needed is not free when you intend to run arms in
+# parallel on the same node.
+#SBATCH --mem=64G
 #SBATCH --time=20:00:00
 # Generous budget: packing=False (see below) means no sequence-packing
 # amortization, so real wall-clock is materially higher than a packed run.
