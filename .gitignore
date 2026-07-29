@@ -9,6 +9,7 @@ venv/
 venv_teacher/
 venv_*/
 runs/
+tools/llama.cpp/
 *.gguf
 *.safetensors
 __pycache__/
