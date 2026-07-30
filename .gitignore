@@ -15,3 +15,7 @@ tools/llama.cpp/
 __pycache__/
 runtime/lib/
 runtime/raw.txt
+
+# Real typed queries -- eval data derived from actual usage. Kept out of git
+# per the standing rule on private eval data (can contain hostnames/paths).
+data/processed/heldout_user*.jsonl
