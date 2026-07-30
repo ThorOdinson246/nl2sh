@@ -51,7 +51,22 @@ def _runtime_env() -> dict:
 def _state_dir() -> Path:
     d = cfg_mod.data_dir() / "run"
     d.mkdir(parents=True, exist_ok=True)
+    # Owner-only: this dir holds the port the local model server listens on.
+    # On a multi-user box loopback is shared across UIDs, so a world-readable
+    # port file tells any co-tenant exactly where to find an unauthenticated
+    # endpoint.
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
     return d
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write owner-only, creating with 0600 rather than chmod-ing afterwards."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
 
 
 def _port_file() -> Path:
@@ -83,13 +98,29 @@ def running_port() -> int | None:
     return port if _alive(port) else None
 
 
+def _is_our_server(pid: int) -> bool:
+    """Confirm a pid really is our llama-server before signalling it.
+
+    Without this, `nl2sh stop` blindly SIGTERMs whatever now owns a recycled
+    pid. On a long-lived shared node that is somebody's -- possibly your own --
+    unrelated process.
+    """
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
+    except OSError:
+        return False
+    return "llama-server" in cmdline
+
+
 def stop_server() -> bool:
     pid_f = _state_dir() / "server.pid"
     stopped = False
     if pid_f.exists():
         try:
-            os.kill(int(pid_f.read_text().strip()), signal.SIGTERM)
-            stopped = True
+            pid = int(pid_f.read_text().strip())
+            if _is_our_server(pid):
+                os.kill(pid, signal.SIGTERM)
+                stopped = True
         except (ProcessLookupError, ValueError, PermissionError):
             pass
         pid_f.unlink(missing_ok=True)
@@ -109,8 +140,8 @@ def start_server(model: Path, server_bin: Path, threads: int,
         lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(cmd)}\n".encode())
         proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                                 env=_runtime_env(), start_new_session=True)
-    (_state_dir() / "server.pid").write_text(str(proc.pid))
-    _port_file().write_text(str(port))
+    _write_private(_state_dir() / "server.pid", str(proc.pid))
+    _write_private(_port_file(), str(port))
 
     if not quiet:
         print(f"nl2sh: loading model into memory (first run only)...",

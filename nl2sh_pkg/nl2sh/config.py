@@ -54,8 +54,12 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> Path:
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
     p = config_path()
     p.write_text(json.dumps(cfg, indent=2) + "\n")
+    # Owner-only. On the shared-NFS-home clusters this tool targets, the default
+    # umask leaves files group-readable.
+    os.chmod(p, 0o600)
     return p
 
 

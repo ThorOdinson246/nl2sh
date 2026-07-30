@@ -18,8 +18,12 @@ rm -rf /
 
 ```bash
 pip install nl2sh
-nl2sh setup          # fetches the ~940 MB model once
+nl2sh setup --model /path/to/nl2sh-1.5b-Q4_K_M.gguf
 ```
+
+> **Not yet on PyPI, and `setup` does not download the model yet.** Point it at
+> a GGUF you already have; a released build would fetch it from a model hub.
+> `nl2sh doctor` tells you exactly what is missing.
 
 ## Use
 
@@ -32,7 +36,7 @@ eval "$(nl2sh -q show disk usage)"      # bare output, for scripting
 
 | command | what it does |
 |---|---|
-| `nl2sh setup` | first-run setup, installs the model |
+| `nl2sh setup --model <gguf>` | register a local model file |
 | `nl2sh doctor` | check the install and report what's missing |
 | `nl2sh stop` | unload the model from memory |
 | `nl2sh config --set threads=3` | change settings |

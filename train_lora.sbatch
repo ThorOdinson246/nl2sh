@@ -73,7 +73,7 @@ $PY -c "import torch;print('torch',torch.__version__,'cuda',torch.cuda.is_availa
 # explicit warning, not a silent gotcha). That means training loss would
 # include the instruction/system-prompt tokens, working directly against
 # the "+21% from correct output-format learning" result this whole approach
-# is built on (../hist/docs/GENERATION_FEASIBILITY.md,
+# is built on (an earlier private feasibility study (not part of this release),
 # docs/DISTILLATION.md sec 8). For this first real baseline, correct
 # masking matters more than the wall-clock savings from packing.
 srun $PY $PROJ/train_lora.py \

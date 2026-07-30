@@ -10,6 +10,13 @@ from __future__ import annotations
 
 import re
 
+# Model output is untrusted and goes straight to a terminal. Escape sequences
+# can conceal or repaint the command a user is about to approve (e.g. \x1b[8m
+# hides text), so they are removed before the string is ever printed, safety-
+# checked, or executed. Previously these survived into the displayed command.
+CONTROL_RE = re.compile(
+    r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
+
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 FENCE_RE = re.compile(r"```[a-zA-Z]*\s*\n?(.*?)(?:```|\Z)", re.DOTALL)
 PROMPT_RE = re.compile(r"^[\$#>]\s+")
@@ -22,7 +29,7 @@ PREAMBLE_RE = re.compile(
 def extract(raw: str) -> str:
     if not raw:
         return ""
-    text = THINK_RE.sub("", raw).strip()
+    text = THINK_RE.sub("", CONTROL_RE.sub("", raw)).strip()
     # Unterminated <think> means the model never stopped reasoning -> no answer.
     if "<think>" in text:
         text = text.split("<think>")[0].strip()

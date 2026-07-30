@@ -64,8 +64,15 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
            "mode": mode, "verdict": None}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        existed = path.exists()
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if not existed:
+            # Owner-only: this file holds real shell requests, which can contain
+            # hostnames, paths and secrets. Default umask on a shared NFS home
+            # would otherwise leave it group-readable.
+            os.chmod(path, 0o600)
     except OSError:
         pass  # logging must never break the tool
 
@@ -90,10 +97,21 @@ def cmd_query(args, cfg: dict) -> int:
         print("nl2sh: the model returned nothing usable. Try rephrasing.", file=sys.stderr)
         return 5
 
-    # --quiet prints the bare command and nothing else, so it composes:
-    #   eval "$(nl2sh -q ...)"   /   x=$(nl2sh -q ...)
+    # --quiet keeps STDOUT bare so it composes: x=$(nl2sh -q ...).
+    # But it must still run the safety check. The README advertises
+    # eval "$(nl2sh -q ...)" as the scripting idiom, and an earlier version
+    # returned here BEFORE check() was ever called -- so the one documented
+    # path that pipes straight into a shell was the one path with no checking
+    # at all. Warnings go to stderr, leaving stdout clean.
     if args.quiet:
+        findings = check(cmds[0])
+        if any(sev == "DANGER" for sev, _ in findings):
+            print(f"nl2sh: refusing to emit a command flagged DANGER:", file=sys.stderr)
+            print_findings(findings)
+            return 6
         print(cmds[0])
+        if findings:
+            print_findings(findings)
         return 0
 
     for i, c in enumerate(cmds):
