@@ -1,4 +1,4 @@
-"""Tell the model about the machine it is running on.
+r"""Tell the model about the machine it is running on.
 
 Why this exists, and why it is shaped this way.
 
