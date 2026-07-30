@@ -48,6 +48,14 @@ comparison was made fair.
   several constraints at once ("recursively, excluding hidden files, case
   insensitive"). This is the model's most significant, measured weakness —
   see the "compositional gap" analysis in `docs/STATUS.md`.
+- **Measured 36% on adversarial prompts.** The 0.617 figure above is the
+  published benchmark. A separate audit wrote 136 prompts specifically to
+  attack known weak spots and the model answered 36% of them correctly:
+  93% on non-English and typo'd input, 57% on slang, but 23% on requests
+  carrying three or more constraints, 18% on one-word queries, and 8% on
+  genuinely ambiguous requests like "clean up this mess" — where it invents
+  a specific interpretation rather than asking. Treat the benchmark number as
+  best-case and this as the floor.
 - **Prompt injection is not resisted at the model level.** Nothing about
   the model's training makes it robust to adversarial input trying to
   manipulate what command it produces. Do not point it at untrusted text.
