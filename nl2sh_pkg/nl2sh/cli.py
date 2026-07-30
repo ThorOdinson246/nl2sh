@@ -87,6 +87,10 @@ def cmd_query(args, cfg: dict) -> int:
             print_findings(findings)
             sys.stderr.flush()
 
+    # Always flush before anything else reaches stderr, so the command is
+    # never printed after messages that refer to it.
+    sys.stdout.flush()
+
     if args.timing:
         print(DIM(f"  [{elapsed:.2f}s, {mode} mode]"), file=sys.stderr)
 

@@ -28,7 +28,14 @@ DANGER = [
     (re.compile(r"\bmkfs(\.\w+)?\b"), "filesystem format"),
     (re.compile(r":\s*\(\s*\)\s*\{.*\|\s*:\s*&\s*\}\s*;\s*:"), "fork bomb"),
     (re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(bash|sh|zsh|fish)\b"), "pipe remote content into a shell"),
-    (re.compile(r"\bchmod\b.*\s-R\s+777\s+/(\s|$)"), "recursive chmod 777 on /"),
+    # find can delete a whole tree without the word "rm -rf" appearing at all.
+    # Caught by testing: `find / -type f -exec rm {} \;` was NOT flagged by the
+    # rm patterns above and was only stopped by the interactive-confirm check.
+    (re.compile(rf"\bfind\b\s+{CRITICAL_PATHS}(\s|$|/).*?"
+                r"(?:-delete\b|-exec\w*\s+(?:sudo\s+)?(?:rm|shred|truncate)\b)"),
+     "find + delete across a critical path"),
+    (re.compile(rf"\b(chmod|chown)\b.*\s-R\b.*\s{CRITICAL_PATHS}(\s|$|/)"),
+     "recursive permission/ownership change on a critical path"),
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd)"), "redirect over a block device"),
     (re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"), "shuts the machine down"),
 ]
