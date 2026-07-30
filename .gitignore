@@ -19,3 +19,11 @@ runtime/raw.txt
 # Real typed queries -- eval data derived from actual usage. Kept out of git
 # per the standing rule on private eval data (can contain hostnames/paths).
 data/processed/heldout_user*.jsonl
+
+# scripts/icalfa_feasibility/ is a one-off feasibility spike: a full venv, a
+# pixi/podman install, and downloaded ollama models. `venv_*/` above already
+# covers venv_icalfa/, but the other two (~950MB combined) were untracked-yet-
+# NOT-ignored -- one `git add -A` away from being committed wholesale.
+scripts/icalfa_feasibility/ollama_models/
+scripts/icalfa_feasibility/podman_pixi/
+scripts/icalfa_feasibility/*.log
