@@ -42,7 +42,9 @@ import shlex
 
 # Control-byte strip. Model output is untrusted and lands in a terminal, where
 # escape sequences can conceal or repaint what the user is about to approve.
-CONTROL_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
+CONTROL_RE = re.compile(
+    r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|[\x00-\x08\x0b-\x1f\x7f]")
 
 # Paths that must be the TARGET ITSELF to count, never a prefix of a deeper one.
 CRITICAL_TARGETS = {
@@ -195,7 +197,8 @@ def _is_critical(tok: str) -> tuple[bool, str]:
     if re.search(r"\$\{?\w+|\$\(|`", tok):
         if tok in ("$HOME", "${HOME}") or tok.startswith(("$HOME/", "${HOME}/")):
             return True, "deletes your home directory"
-        return True, "target contains an unexpanded variable or substitution -- if it is empty this hits /"
+        return True, ("target contains an unexpanded variable or substitution"
+                      " -- if it is empty this hits /")
     norm = _norm_path(tok)
     if norm in CRITICAL_TARGETS:
         return True, f"target is the critical path {norm}"
@@ -248,7 +251,8 @@ WHOLE_DANGER = [
      "reformats/erases a block device"),
     (re.compile(r"\bparted\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)[^|;]*\b(rm|mklabel)\b"),
      "modifies the partition table of a block device"),
-    (re.compile(r"\b(shutdown|reboot|halt|poweroff|init\s+0|init\s+6)\b"), "shuts the machine down"),
+    (re.compile(r"\b(shutdown|reboot|halt|poweroff|init\s+0|init\s+6)\b"),
+     "shuts the machine down"),
     (re.compile(r"\bgit\s+clean\b(?=[^|;]*-\w*[fx])(?=[^|;]*-\w*[dx])"),
      "git clean deletes untracked files irrecoverably"),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards uncommitted work"),
@@ -381,7 +385,8 @@ def check(command: str) -> list[tuple[str, str]]:
         # `nohup rm -rf /` and `nice rm -rf /` all passed clean while running rm.
         while toks:
             head = toks[0]
-            if "=" in head and not head.startswith(("-", "/")) and head.split("=", 1)[0].isidentifier():
+            if ("=" in head and not head.startswith(("-", "/"))
+                    and head.split("=", 1)[0].isidentifier()):
                 toks = toks[1:]          # VAR=value prefix
                 continue
             base = head.rsplit("/", 1)[-1]
@@ -414,7 +419,8 @@ def check(command: str) -> list[tuple[str, str]]:
         # least be surfaced rather than silently judged as an unknown, inert verb.
         if re.search(r"\$\(|`", toks[0]):
             findings.append(("CAUTION",
-                              "command name comes from a substitution -- cannot verify what will run"))
+                              "command name comes from a substitution"
+                              " -- cannot verify what will run"))
             continue
 
         verb = toks[0].rsplit("/", 1)[-1]
@@ -486,7 +492,8 @@ def check(command: str) -> list[tuple[str, str]]:
                 # in the template". Surface both: the placeholder CAUTION
                 # (added later) never suppresses this.
                 for a in args:
-                    if not a.startswith("-") and (PLACEHOLDER_RE.fullmatch(a) or PLACEHOLDER_HINT.search(a)):
+                    if not a.startswith("-") and (
+                            PLACEHOLDER_RE.fullmatch(a) or PLACEHOLDER_HINT.search(a)):
                         findings.append(("DANGER",
                             f"{verb}: target is a placeholder -- whatever real path you substitute "
                             f"will be permanently deleted"))
@@ -495,7 +502,8 @@ def check(command: str) -> list[tuple[str, str]]:
             # `-ok` is `-exec` with a per-file y/n prompt -- still deletes
             # everything the user says yes to, and `find / -ok rm -rf {} \;`
             # passed clean because only `-exec` was in the pattern.
-            deletes = bool(re.search(r"-delete\b|-(?:exec|ok)\w*\s+(sudo\s+)?(rm|shred|truncate)\b", seg))
+            deletes = bool(re.search(
+                r"-delete\b|-(?:exec|ok)\w*\s+(sudo\s+)?(rm|shred|truncate)\b", seg))
             if deletes:
                 roots = []
                 for a in args:

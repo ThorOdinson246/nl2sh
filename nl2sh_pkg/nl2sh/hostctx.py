@@ -155,7 +155,8 @@ def stable_block(facts: dict | None = None) -> str:
     ]
     # Steer to the modern tool when the legacy one is genuinely unavailable.
     if "ss" in f["present"] and "netstat" in f["missing"]:
-        lines.append("For listening ports use `ss -lptn` (shows the owning pid); netstat is unavailable.")
+        lines.append("For listening ports use `ss -lptn` (shows the owning pid); "
+                     "netstat is unavailable.")
     if "lsof" in f["missing"] and "ss" in f["present"]:
         lines.append("lsof is unavailable; use `ss -lptn` or `fuser` instead.")
     block = "\n".join(lines)

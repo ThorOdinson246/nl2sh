@@ -230,7 +230,8 @@ def _is_our_server(pid: int) -> bool:
     unrelated process.
     """
     try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        cmdline = raw.replace(b"\x00", b" ").decode(errors="replace")
     except OSError:
         return False
     return "llama-server" in cmdline
@@ -290,7 +291,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
         _write_private(_port_file(), str(port))
 
     if not quiet:
-        print(f"nl2sh: loading model into memory (first run only)...",
+        print("nl2sh: loading model into memory (first run only)...",
               file=sys.stderr, end="", flush=True)
     deadline = time.time() + wait
     while time.time() < deadline:
@@ -431,7 +432,8 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
     else:
         cli = cfg_mod.find_llama_cli()
         if cli is None:
-            raise FileNotFoundError("neither llama-server nor llama-cli found -- run `nl2sh doctor`")
+            raise FileNotFoundError(
+                "neither llama-server nor llama-cli found -- run `nl2sh doctor`")
         raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system)
         mode = "oneshot"
 

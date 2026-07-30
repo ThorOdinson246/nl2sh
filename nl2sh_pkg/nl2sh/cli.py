@@ -110,7 +110,7 @@ def cmd_query(args, cfg: dict) -> int:
     if args.quiet:
         findings = check(cmds[0])
         if any(sev == "DANGER" for sev, _ in findings):
-            print(f"nl2sh: refusing to emit a command flagged DANGER:", file=sys.stderr)
+            print("nl2sh: refusing to emit a command flagged DANGER:", file=sys.stderr)
             print_findings(findings)
             return 6
         print(cmds[0])
@@ -177,7 +177,8 @@ def cmd_query(args, cfg: dict) -> int:
 
     if cfg.get("confirm_execute", True):
         if not sys.stdin.isatty():
-            print("nl2sh: refusing to execute without an interactive confirmation.", file=sys.stderr)
+            print("nl2sh: refusing to execute without an interactive confirmation.",
+                  file=sys.stderr)
             return 6
         try:
             ans = input(f"\n{BOLD('Run this?')} [y/N] ").strip().lower()
@@ -267,7 +268,8 @@ def cmd_doctor(args, cfg: dict) -> int:
           f"{bundled if bundled.is_dir() else 'using system libstdc++'}")
 
     port = engine.running_port()
-    print(f"  {'ok' if port else 'idle'}  server pid {'listening on ' + str(port) if port else 'not running'}")
+    where = f"listening on {port}" if port else "not running"
+    print(f"  {'ok' if port else 'idle'}  server pid {where}")
     print(f"  info  threads    {cfg_mod.resolve_threads(cfg)} (of {os.cpu_count()} cores)")
     print(f"  info  config     {cfg_mod.config_path()}")
     print(f"\n{GREEN('All good.') if ok else RED('Not ready.')}")
