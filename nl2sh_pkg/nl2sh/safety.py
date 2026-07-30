@@ -291,6 +291,15 @@ WHOLE_CAUTION = [
      "rsync --delete removes files at the destination that are not in the source"),
     (re.compile(r"\b(awk|cut|sed)\b[^|]*\|\s*xargs\b[^|]*\b(kill|docker\s+rm|rm)\b"),
      "kills/removes using a field parsed from text -- verify the column is really an ID"),
+    # Killing by a target the model CHOSE rather than one the user named. An
+    # everyday-usage audit found "restart a hung process called worker.py"
+    # produce `fuser -k 5000` -- a port never mentioned in the request, which
+    # would terminate whatever unrelated service happens to hold it. The
+    # existing "parsed field" rule did not fire, because the value is not
+    # parsed from output at all: it is invented. A literal port or pid handed
+    # to a kill verb is worth naming for exactly that reason.
+    (re.compile(r"\b(?:fuser|pkill|killall|kill)\b(?:\s+-{1,2}\w+)*\s+-?\d+\s*(?:$|[|;&])"),
+     "kills a process selected by a literal port or pid -- confirm it is the right one"),
     (re.compile(r"^\s*(sudo\s+)?ping\b(?![^|;]*\s-[a-zA-Z]*c\b)(?![^|;]*\s-c\d)"),
      "ping without -c runs until you interrupt it"),
     (re.compile(r"\b(curl|wget)\b[^|;]*\b(https?://|[a-z0-9-]+\.[a-z]{2,})"),

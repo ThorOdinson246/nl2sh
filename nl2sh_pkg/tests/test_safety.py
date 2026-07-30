@@ -180,6 +180,23 @@ MUST_BE_CLEAN_OF_DANGER = [
 ]
 
 
+# Kill-by-literal-target: the target was invented by the model, not named by the
+# user. From an everyday-usage audit: "restart a hung process called worker.py"
+# produced `fuser -k 5000` -- a port never mentioned, which would kill whatever
+# unrelated service holds it. CAUTION rather than DANGER: killing a process is
+# recoverable, and these forms are legitimate when the user did supply the number.
+MUST_CAUTION = [
+    "fuser -k 5000", "pkill -f 1234", "killall -9 3000", "kill -9 4321", "kill 1",
+]
+
+# Selecting a process by NAME or from real output is the correct idiom and must
+# stay quiet, or the warning becomes noise on ordinary process management.
+MUST_NOT_CAUTION_KILL = [
+    "pkill -f worker.py", "killall python", "kill -9 $(pgrep -f worker.py)",
+    "systemctl restart nginx", "ps aux | head -20",
+]
+
+
 def main() -> int:
     fails = []
     for c in MUST_FLAG_DANGER:
@@ -193,6 +210,13 @@ def main() -> int:
     if worst(check("\x1b[8mrm -rf /\x1b[0m")) != "DANGER":
         fails.append("ANSI-wrapped rm -rf / not detected")
 
+    for c in MUST_CAUTION:
+        if worst(check(c)) != "CAUTION":
+            fails.append(f"MISSED (should be CAUTION): {c!r} -> {check(c)}")
+    for c in MUST_NOT_CAUTION_KILL:
+        if any("literal port or pid" in why for _, why in check(c)):
+            fails.append(f"FALSE POSITIVE (kill-by-name should be quiet): {c!r}")
+
     # ReDoS regression: the fork-bomb pattern was quadratic on ordinary text.
     # check() runs on every candidate, so a long garbage output would hang the CLI.
     import time
@@ -202,7 +226,8 @@ def main() -> int:
     if dt > 3.0:
         fails.append(f"ReDoS: check() on 200k chars took {dt:.1f}s")
 
-    total = len(MUST_FLAG_DANGER) + len(MUST_BE_CLEAN_OF_DANGER) + 2
+    total = (len(MUST_FLAG_DANGER) + len(MUST_BE_CLEAN_OF_DANGER)
+             + len(MUST_CAUTION) + len(MUST_NOT_CAUTION_KILL) + 2)
     for f in fails:
         print("  " + f)
     print(f"\n{total - len(fails)}/{total} passed"

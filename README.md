@@ -48,6 +48,16 @@ comparison was made fair.
   several constraints at once ("recursively, excluding hidden files, case
   insensitive"). This is the model's most significant, measured weakness —
   see the "compositional gap" analysis in `docs/STATUS.md`.
+- **Roughly 7 in 10 on everyday requests.** On 150 ordinary developer
+  prompts (git, file organisation, search, archives, disk cleanup,
+  processes and ports, docker, python/node workflow, permissions,
+  networking, text processing, system info) it was correct 70.7% of the
+  time and correct-or-workable 80.0%. 59 of those verdicts were confirmed
+  by actually running the command against fixtures. Worth knowing *where*
+  the other 30% falls: not exotic edge cases, but routine commands --
+  `git status` answered with `git remote -v`, `npm run` with no script
+  name, a `sort` missing `-n` so "9.5" ranks above "55.0". Those are
+  exactly the commands least likely to be double-checked before running.
 - **Measured 36% on adversarial prompts.** The 0.617 figure above is the
   published benchmark. A separate audit wrote 136 prompts specifically to
   attack known weak spots and the model answered 36% of them correctly:
