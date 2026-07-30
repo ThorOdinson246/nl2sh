@@ -14,9 +14,11 @@ between "feels instant" and "why is this slower than typing it myself".
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -31,6 +33,77 @@ from .extract import extract
 
 HOST = "127.0.0.1"
 STOP = ["\n", "<|im_end|>", "```"]
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP over a UNIX domain socket.
+
+    Why the server is not on a TCP port by default. On a normal multi-user Linux
+    box -- which every HPC login and compute node is -- loopback is shared across
+    UIDs, so a TCP llama-server is reachable by any co-tenant, and the port
+    number sits in a file they can read. Worse, choosing a port with bind(0),
+    closing it, then starting the server on that number leaves a window in which
+    another local process can claim it first and answer in our place, returning
+    an arbitrary "generated command".
+
+    A socket file inside a 0700 directory removes the whole class: there is no
+    port to squat and access is governed by filesystem permissions.
+    """
+
+    def __init__(self, path: str, timeout: float = 120.0):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._path)
+        self.sock = sock
+
+
+def _sock_path() -> Path:
+    return _state_dir() / "server.sock"
+
+
+def _token_path() -> Path:
+    return _state_dir() / "server.token"
+
+
+def _read_token() -> str | None:
+    try:
+        return _token_path().read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
+    """POST/GET to the running server over its UNIX socket or TCP port."""
+    token = _read_token()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data = json.dumps(body).encode() if body is not None else None
+
+    sp = _sock_path()
+    if sp.exists():
+        conn = _UnixHTTPConnection(str(sp), timeout=timeout)
+        try:
+            conn.request("POST" if data else "GET", endpoint, body=data, headers=headers)
+            resp = conn.getresponse()
+            payload = resp.read()
+            if resp.status != 200:
+                raise RuntimeError(f"server returned {resp.status}: {payload[:200]!r}")
+            return json.loads(payload) if payload else {}
+        finally:
+            conn.close()
+
+    port = running_port()
+    if port is None:
+        raise RuntimeError("no running nl2sh server")
+    req = urllib.request.Request(f"http://{HOST}:{port}{endpoint}", data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        payload = r.read()
+    return json.loads(payload) if payload else {}
 
 
 def _runtime_env() -> dict:
@@ -80,7 +153,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _alive(port: int, timeout: float = 0.4) -> bool:
+def _alive(port: int | None = None, timeout: float = 0.6) -> bool:
+    sp = _state_dir() / "server.sock"
+    if sp.exists():
+        try:
+            _request("/health", timeout=timeout)
+            return True
+        except Exception:
+            return False
+    if port is None:
+        return False
     try:
         with urllib.request.urlopen(f"http://{HOST}:{port}/health", timeout=timeout) as r:
             return r.status == 200
@@ -126,23 +208,45 @@ def stop_server() -> bool:
             pass
         pid_f.unlink(missing_ok=True)
     _port_file().unlink(missing_ok=True)
+    _sock_path().unlink(missing_ok=True)
+    _token_path().unlink(missing_ok=True)
     return stopped
 
 
 def start_server(model: Path, server_bin: Path, threads: int,
                  wait: float = 180.0, quiet: bool = False) -> int:
-    if port := running_port():
-        return port
-    port = _free_port()
-    log = _state_dir() / "server.log"
-    cmd = [str(server_bin), "-m", str(model), "--host", HOST, "--port", str(port),
-           "-t", str(threads), "-c", "2048", "--no-webui"]
+    if _alive(running_port()):
+        return running_port() or 0
+    sd = _state_dir()
+    log = sd / "server.log"
+
+    # A token is generated even for the socket transport: it costs nothing and
+    # means a stale/hijacked endpoint cannot silently serve us.
+    token = secrets.token_urlsafe(24)
+    _write_private(_token_path(), token)
+
+    use_socket = os.environ.get("NL2SH_FORCE_TCP") != "1"
+    if use_socket:
+        sp = _sock_path()
+        sp.unlink(missing_ok=True)
+        port = 0
+        cmd = [str(server_bin), "-m", str(model), "--host", str(sp),
+               "-t", str(threads), "-c", "2048", "--no-webui", "--api-key", token]
+    else:
+        port = _free_port()
+        cmd = [str(server_bin), "-m", str(model), "--host", HOST, "--port", str(port),
+               "-t", str(threads), "-c", "2048", "--no-webui", "--api-key", token]
+    # The server log records the launch command line and can contain prompt
+    # text; it gets the same owner-only treatment as the pid and token.
+    if not log.exists():
+        os.close(os.open(str(log), os.O_WRONLY | os.O_CREAT, 0o600))
     with open(log, "ab") as lf:
         lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(cmd)}\n".encode())
         proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                                 env=_runtime_env(), start_new_session=True)
-    _write_private(_state_dir() / "server.pid", str(proc.pid))
-    _write_private(_port_file(), str(port))
+    _write_private(sd / "server.pid", str(proc.pid))
+    if port:
+        _write_private(_port_file(), str(port))
 
     if not quiet:
         print(f"nl2sh: loading model into memory (first run only)...",
@@ -151,7 +255,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"llama-server exited rc={proc.returncode}; see {log}")
-        if _alive(port):
+        if _alive(port or None):
             if not quiet:
                 print(" ready.", file=sys.stderr, flush=True)
             return port
@@ -160,11 +264,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
 
 
 def _post(port: int, body: dict) -> list[str]:
-    req = urllib.request.Request(
-        f"http://{HOST}:{port}/v1/chat/completions",
-        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = json.loads(r.read())
+    data = _request("/v1/chat/completions", body)
     return [(c["message"]["content"], c.get("finish_reason")) for c in data.get("choices", [])]
 
 

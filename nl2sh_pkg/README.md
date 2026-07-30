@@ -41,6 +41,25 @@ eval "$(nl2sh -q show disk usage)"      # bare output, for scripting
 | `nl2sh stop` | unload the model from memory |
 | `nl2sh config --set threads=3` | change settings |
 
+## Security notes
+
+**Never run `nl2sh` through `sudo`.** Three environment variables
+(`NL2SH_LLAMA_SERVER`, `NL2SH_LLAMA_CLI`, `NL2SH_RUNTIME_LIB`) point at the
+binaries and shared libraries it executes. That is harmless when it is your own
+environment running as you, but across a privilege boundary -- `sudo -E`, a cron
+or setuid wrapper -- they become a way to run an arbitrary binary as root.
+
+The model server listens on a **UNIX socket** inside a `0700` directory, not a
+TCP port, and requires a per-run bearer token. On a shared machine loopback is
+reachable by every other user, so a TCP port would let a co-tenant use your model
+or -- worse -- claim the port first and answer in place of the real server with a
+command of their choosing. Config, query log, pid, token and server log are all
+`0600`.
+
+**The safety check is a seatbelt, not a sandbox.** It is a denylist over a
+Turing-complete language: `eval`, base64 indirection and aliasing defeat any
+static check. The real protection is that nothing runs unless you ask it to.
+
 ## Design notes
 
 **It never runs anything on its own.** The default prints the command and
