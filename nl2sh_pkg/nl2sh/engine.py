@@ -26,6 +26,7 @@ import urllib.request
 from pathlib import Path
 
 from . import config as cfg_mod
+from . import hostctx
 from .extract import extract
 
 HOST = "127.0.0.1"
@@ -167,7 +168,8 @@ def _post(port: int, body: dict) -> list[str]:
     return [(c["message"]["content"], c.get("finish_reason")) for c in data.get("choices", [])]
 
 
-def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
+def _query_server(port: int, prompt: str, cfg: dict, n: int,
+                  system: str | None = None) -> list[str]:
     """Greedy answer first, then sampled alternatives.
 
     Getting this wrong was visible in real use: asking for 3 candidates used to
@@ -179,7 +181,7 @@ def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
     slot 1 must always be the model's best single guess.
     """
     base = {
-        "messages": [{"role": "system", "content": cfg_mod.SYSTEM_PROMPT},
+        "messages": [{"role": "system", "content": system or cfg_mod.SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
         "max_tokens": cfg.get("max_tokens", 64),
         "stop": STOP,
@@ -204,8 +206,9 @@ def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
     return out
 
 
-def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int) -> list[str]:
-    cmd = [str(cli_bin), "-m", str(model), "-sys", cfg_mod.SYSTEM_PROMPT, "-p", prompt,
+def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int,
+                   system: str | None = None) -> list[str]:
+    cmd = [str(cli_bin), "-m", str(model), "-sys", system or cfg_mod.SYSTEM_PROMPT, "-p", prompt,
            "-st", "--no-display-prompt", "--no-warmup",
            "--temp", str(cfg.get("temperature", 0.0)),
            "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads)]
@@ -274,16 +277,21 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         elif (c := Path(cfg.get("llama_server", "/nonexistent"))).exists():
             server_bin = c
 
+    # Host context defaults ON: it is prefix-cached, so it costs one-time
+    # prefill rather than per-query latency, and it removed a whole class of
+    # placeholder / wrong-tool failures. cfg["host_context"]=false disables it.
+    system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+
     t0 = time.time()
     if server_bin is not None:
         port = start_server(model, server_bin, threads, quiet=quiet)
-        raws = _query_server(port, prompt, cfg, n)
+        raws = _query_server(port, user_msg, cfg, n, system=system)
         mode = "server"
     else:
         cli = cfg_mod.find_llama_cli()
         if cli is None:
             raise FileNotFoundError("neither llama-server nor llama-cli found -- run `nl2sh doctor`")
-        raws = _query_oneshot(model, cli, prompt, cfg, threads)
+        raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system)
         mode = "oneshot"
 
     cmds, seen = [], set()
