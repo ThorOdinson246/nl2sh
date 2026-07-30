@@ -22,8 +22,34 @@ classifiers = [
 # server, so `pip install nl2sh` cannot break someone's environment.
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.5", "build>=1"]
+
 [project.scripts]
 nl2sh = "nl2sh.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["nl2sh*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "W"]
+ignore = [
+  "E731",  # lambda assignments -- cli.py uses them deliberately for the
+           # colour helpers (BOLD/DIM/RED/...); not worth a refactor here.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # test_safety.py needs sys.path.insert before its import
+# test_safety.py is the crown-jewel regression file: every entry is a
+# confirmed bypass or false positive from four adversarial audits. Its
+# content (including these literal '\;' find(1) strings and long inline
+# comments) is deliberately left untouched rather than reformatted.
+"tests/test_safety.py" = ["E402", "E501", "W605"]
