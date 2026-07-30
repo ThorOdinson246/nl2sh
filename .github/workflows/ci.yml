@@ -72,7 +72,7 @@ jobs:
       - name: nl2sh --help
         run: /tmp/nl2sh-install-test/bin/nl2sh --help
 
-      - name: nl2sh doctor (expected to fail gracefully: no model present)
+      - name: "nl2sh doctor (expected to exit 1 gracefully, no model present)"
         run: |
           # doctor must exit non-zero when no model/runtime is installed, but
           # it must NOT crash. Assert exactly that: rc==1, not an exception.
