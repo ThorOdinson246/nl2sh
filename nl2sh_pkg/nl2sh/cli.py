@@ -65,14 +65,18 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
-        existed = path.exists()
-        with open(path, "a", encoding="utf-8") as f:
+        # Create at 0600 from the open() call itself rather than writing then
+        # chmod-ing after: the latter left the FIRST line -- a real shell
+        # request, which can contain hostnames, paths and secrets -- exposed
+        # at the umask-derived default mode (group-readable on a shared NFS
+        # home) for the whole window between the write and the chmod call.
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)   # also covers a pre-existing, wrongly-permissioned file
+        except OSError:
+            pass
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        if not existed:
-            # Owner-only: this file holds real shell requests, which can contain
-            # hostnames, paths and secrets. Default umask on a shared NFS home
-            # would otherwise leave it group-readable.
-            os.chmod(path, 0o600)
     except OSError:
         pass  # logging must never break the tool
 

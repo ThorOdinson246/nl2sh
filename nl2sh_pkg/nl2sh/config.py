@@ -59,10 +59,24 @@ def save_config(cfg: dict) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     os.chmod(d, 0o700)
     p = config_path()
-    p.write_text(json.dumps(cfg, indent=2) + "\n")
-    # Owner-only. On the shared-NFS-home clusters this tool targets, the default
-    # umask leaves files group-readable.
-    os.chmod(p, 0o600)
+    # Create with 0600 from the start rather than write-then-chmod: the latter
+    # has a window, however brief, where the file exists at the umask-derived
+    # default mode -- group-readable on the shared-NFS-home clusters this tool
+    # targets -- before the chmod call closes it. A local co-tenant reading in
+    # that window would see this file's full contents, which is only settings
+    # today but is exactly the class of bug that bit the token/pid files in
+    # engine.py before they were switched to this same atomic-create pattern.
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    # The 0o600 above only applies at CREATION -- an already-existing file
+    # (e.g. written before this fix, or by an older nl2sh) keeps whatever mode
+    # it already had. fchmod on the open fd closes that gap too, and is
+    # race-free since it acts on the fd rather than the path.
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(cfg, indent=2) + "\n")
     return p
 
 

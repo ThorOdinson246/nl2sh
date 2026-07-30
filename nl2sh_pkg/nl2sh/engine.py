@@ -76,6 +76,28 @@ def _read_token() -> str | None:
         return None
 
 
+# A cap on how much of the server's response we will ever buffer. This is our
+# own llama-server, started by us with a small `-c 2048` context, so a normal
+# reply is at most a few KB -- but nothing upstream bounds `resp.read()`, and
+# a compromised, hung, or simply buggy server (or, with NL2SH_FORCE_TCP=1, a
+# co-tenant that won the documented port-squat race) can otherwise stream an
+# unbounded response and OOM the client before a single byte is validated.
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def _read_capped(readable, limit: int = _MAX_RESPONSE_BYTES) -> bytes:
+    chunks, total = [], 0
+    while True:
+        chunk = readable.read(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError(f"server response exceeded {limit} bytes -- refusing to buffer more")
+    return b"".join(chunks)
+
+
 def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
     """POST/GET to the running server over its UNIX socket or TCP port."""
     token = _read_token()
@@ -90,7 +112,7 @@ def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
         try:
             conn.request("POST" if data else "GET", endpoint, body=data, headers=headers)
             resp = conn.getresponse()
-            payload = resp.read()
+            payload = _read_capped(resp)
             if resp.status != 200:
                 raise RuntimeError(f"server returned {resp.status}: {payload[:200]!r}")
             return json.loads(payload) if payload else {}
@@ -102,7 +124,7 @@ def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
         raise RuntimeError("no running nl2sh server")
     req = urllib.request.Request(f"http://{HOST}:{port}{endpoint}", data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        payload = r.read()
+        payload = _read_capped(r)
     return json.loads(payload) if payload else {}
 
 
@@ -137,8 +159,17 @@ def _state_dir() -> Path:
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Write owner-only, creating with 0600 rather than chmod-ing afterwards."""
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Write owner-only, creating with 0600 rather than chmod-ing afterwards.
+
+    O_NOFOLLOW: this writes the token/pid/port files inside a 0700 state dir,
+    so a symlink planted there normally requires having already broken into
+    that directory -- but NL2SH_DATA_DIR is user-controlled, and if it is ever
+    pointed at a shared or otherwise attacker-writable location, a pre-planted
+    symlink here would silently redirect this write (with O_TRUNC!) onto
+    whatever it points to. O_NOFOLLOW turns that into a hard ELOOP failure
+    instead of a silent overwrite of an arbitrary file.
+    """
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(text)
 
