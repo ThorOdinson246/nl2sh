@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in nl2sh is broken or behaving unexpectedly
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, what did you expect, what did you get instead?
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Exact nl2sh invocation
+      placeholder: nl2sh -n 3 "find files bigger than 100MB"
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `nl2sh doctor`
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: nl2sh version / commit
+      placeholder: 0.1.0
+  - type: input
+    id: platform
+    attributes:
+      label: OS / Python version
+      placeholder: Ubuntu 22.04, Python 3.11

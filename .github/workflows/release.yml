@@ -1,0 +1,101 @@
+name: Release
+
+# Fires only on a version tag push (e.g. v0.1.0). Builds sdist+wheel and
+# attaches them to a GitHub Release. The PyPI publish job is a SEPARATE job,
+# gated behind a `pypi` GitHub Environment, so it cannot fire without that
+# environment existing and being configured (reviewers/protection rules) in
+# the repo's Settings -> Environments -- there is no stored PyPI token
+# anywhere in this repo to leak. See the pypi-publish job below for details.
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build backend
+        run: python -m pip install build
+
+      - name: Build sdist and wheel
+        working-directory: nl2sh_pkg
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: nl2sh_pkg/dist/*
+          if-no-files-found: error
+
+  github-release:
+    name: attach artifacts to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required to create/attach to a GitHub Release
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create/update GitHub Release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  # ------------------------------------------------------------------------
+  # PyPI publish -- GATED, cannot fire accidentally.
+  #
+  # This job only runs after a successful build, AND only if the `pypi`
+  # GitHub Environment exists and is configured in this repo's Settings ->
+  # Environments (ideally with required reviewers and/or restricted to `v*`
+  # tags). Until that environment is created, this job simply has nowhere
+  # to run its OIDC exchange against and will fail closed.
+  #
+  # It uses PyPI Trusted Publishing (OIDC), configured on PyPI's project
+  # settings page against this exact repo/workflow/environment -- there is
+  # NO API token stored as a secret anywhere. `id-token: write` is the only
+  # elevated permission granted, scoped to this one job.
+  # ------------------------------------------------------------------------
+  pypi-publish:
+    name: publish to PyPI (trusted publishing, gated)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nl2sh/
+    permissions:
+      id-token: write  # required for OIDC trusted publishing; nothing else
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI via Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

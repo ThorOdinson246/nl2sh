@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install nl2sh with dev extras
+        working-directory: nl2sh_pkg
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        working-directory: nl2sh_pkg
+        run: ruff check .
+
+      - name: Run tests with coverage
+        working-directory: nl2sh_pkg
+        run: pytest -q --cov=nl2sh --cov-report=term-missing
+
+  build-and-install:
+    name: build & install (clean venv)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build backend
+        run: python -m pip install build
+
+      - name: Build sdist and wheel
+        working-directory: nl2sh_pkg
+        run: python -m build
+
+      - name: Install the built wheel into a fresh venv
+        run: |
+          python -m venv /tmp/nl2sh-install-test
+          /tmp/nl2sh-install-test/bin/pip install nl2sh_pkg/dist/*.whl
+
+      - name: nl2sh --help
+        run: /tmp/nl2sh-install-test/bin/nl2sh --help
+
+      - name: nl2sh doctor (expected to fail gracefully: no model present)
+        run: |
+          # doctor must exit non-zero when no model/runtime is installed, but
+          # it must NOT crash. Assert exactly that: rc==1, not an exception.
+          set +e
+          /tmp/nl2sh-install-test/bin/nl2sh doctor
+          rc=$?
+          set -e
+          echo "doctor exit code: $rc"
+          if [ "$rc" -ne 1 ]; then
+            echo "expected doctor to exit 1 (not ready, no crash); got $rc" >&2
+            exit 1
+          fi
