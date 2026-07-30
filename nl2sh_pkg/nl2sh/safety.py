@@ -53,6 +53,24 @@ CRITICAL_TARGETS = {
 
 # Verbs that destroy, and which of their arguments are targets.
 DESTRUCTIVE_VERBS = {"rm", "rmdir", "shred", "unlink", "srm"}
+
+# Tokens that prefix a real command without changing what it does. Without
+# stripping these, `/bin/rm -rf /`, `sudo rm -rf /`, `env rm -rf /`,
+# `nohup rm -rf /` and friends all passed clean while running rm all the same.
+WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "command",
+            "builtin", "exec", "time", "stdbuf", "setsid", "xargs"}
+
+# Shells that take a command as a STRING argument -- the string has to be
+# re-checked, or `bash -c "rm -rf /"` hides everything from the tokenizer.
+SHELL_RUNNERS = {"sh", "bash", "zsh", "ksh", "dash", "fish", "ash"}
+
+# Individual files whose destruction breaks the system. The directory list above
+# does not cover them, so `shred -u /etc/passwd` and `unlink /etc/passwd` were
+# passing while `truncate -s 0 /etc/passwd` was caught -- inconsistent.
+CRITICAL_FILES = {
+    "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/sudoers", "/etc/fstab",
+    "/etc/hosts", "/etc/resolv.conf", "/boot/grub/grub.cfg",
+}
 MOVE_VERBS = {"mv", "cp"}
 PERM_VERBS = {"chmod", "chown", "chgrp"}
 
@@ -80,12 +98,28 @@ def _tokenize(segment: str) -> list[str]:
 
 
 def _norm_path(tok: str) -> str:
-    """Canonicalize a target for comparison against CRITICAL_TARGETS."""
+    """Canonicalize a target for comparison against CRITICAL_TARGETS.
+
+    Collapses `.` and `..` segments, which is what let `rm -rf /usr/../` and
+    `rm -rf /../` through: both resolve to `/`.
+    """
     t = tok.rstrip("/") or "/"
-    # `/.` and `/./` mean `/`
-    while t.endswith("/."):
-        t = t[:-2].rstrip("/") or "/"
-    return t
+    absolute = t.startswith("/")
+    parts: list[str] = []
+    for seg in t.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    if absolute:
+        return "/" + "/".join(parts)
+    # A relative path that collapses to nothing is the CWD, not the filesystem
+    # root. Returning "/" here made an ordinary `find . -exec rm` read as
+    # "delete /" -- a false positive on one of the commonest commands there is.
+    return "/".join(parts) or "."
 
 
 def _is_critical(tok: str) -> tuple[bool, str]:
@@ -101,6 +135,8 @@ def _is_critical(tok: str) -> tuple[bool, str]:
     norm = _norm_path(tok)
     if norm in CRITICAL_TARGETS:
         return True, f"target is the critical path {norm}"
+    if norm in CRITICAL_FILES:
+        return True, f"target is the critical system file {norm}"
     # A glob whose parent is critical: `/va*`, `/*`, `/home/*`, `/etc/*`
     if any(ch in tok for ch in "*?["):
         parent = tok.rsplit("/", 1)[0] if "/" in tok else ""
@@ -130,7 +166,11 @@ WHOLE_DANGER = [
      "pipes remote content straight into a shell"),
     # Fork bomb. Matched on shape rather than exact spacing, since every
     # real-world rendering differs and the old exact-spacing pattern matched none.
-    (re.compile(r"\w*\s*\(\s*\)\s*\{[^}]*\|[^}]*&\s*\}\s*;"), "fork bomb"),
+    # Bounded quantifiers throughout. The unbounded `\w*\s*` prefix and `[^}]*`
+    # bodies made this quadratic on ordinary non-matching text: check("A"*20000)
+    # took 5.5s, and check() runs on every candidate before it is printed.
+    (re.compile(r"\w{0,16}\(\s{0,4}\)\s{0,4}\{[^}]{0,64}\|[^}]{0,64}&\s{0,4}\}\s{0,4};"),
+     "fork bomb"),
     (re.compile(r"\bmkfs(\.\w+)?\b"), "formats a filesystem"),
     (re.compile(r"\bdd\b[^|;]*\bof=/dev/(sd|nvme|hd|vd|mmcblk)"), "writes raw to a block device"),
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd|mmcblk)"), "redirects over a block device"),
@@ -138,7 +178,6 @@ WHOLE_DANGER = [
     (re.compile(r"\bgit\s+clean\b(?=[^|;]*-\w*[fx])(?=[^|;]*-\w*[dx])"),
      "git clean deletes untracked files irrecoverably"),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards uncommitted work"),
-    (re.compile(r"\brsync\b[^|;]*--delete\b"), "rsync --delete removes files at the destination"),
     (re.compile(r"\b(history\s+-c|shred\s+.*\.bash_history)\b"), "erases shell history"),
     (re.compile(r"\bchmod\b[^|;]*\s0{3,4}\s+/\s*$"), "chmod 000 / makes the system unusable"),
     (re.compile(r"\b(truncate\s+-s\s*0|>\s*)\s*/etc/(passwd|shadow|fstab|sudoers)"),
@@ -147,6 +186,11 @@ WHOLE_DANGER = [
 ]
 
 WHOLE_CAUTION = [
+    # --delete is destructive only with respect to its destination. Treating
+    # every `rsync -a --delete ./src/ ./backup/` as DANGER flags ordinary
+    # incremental backups; the critical-target case is caught per-segment below.
+    (re.compile(r"\brsync\b[^|;]*--delete\b"),
+     "rsync --delete removes files at the destination that are not in the source"),
     (re.compile(r"\b(awk|cut|sed)\b[^|]*\|\s*xargs\b[^|]*\b(kill|docker\s+rm|rm)\b"),
      "kills/removes using a field parsed from text -- verify the column is really an ID"),
     (re.compile(r"^\s*(sudo\s+)?ping\b(?![^|;]*\s-[a-zA-Z]*c\b)(?![^|;]*\s-c\d)"),
@@ -194,22 +238,71 @@ def check(command: str) -> list[tuple[str, str]]:
         if pat.search(scan):
             findings.append(("CAUTION", why))
 
+    # `cd / && rm -rf *` is identical in effect to `rm -rf /`, but judging each
+    # segment in isolation sees only a harmless-looking `rm -rf *`. Track a cd
+    # into a critical directory so later segments are read in that light.
+    cwd_is_critical = False
+
     for seg in split_segments(scan):
         toks = _tokenize(seg)
         if not toks:
             continue
-        verb = toks[0]
-        if verb == "sudo" and len(toks) > 1:
-            toks, verb = toks[1:], toks[1]
+
+        # Strip no-op wrappers and env assignments, then basename the binary.
+        # Without this, `/bin/rm -rf /`, `sudo rm -rf /`, `env x=1 rm -rf /`,
+        # `nohup rm -rf /` and `nice rm -rf /` all passed clean while running rm.
+        while toks:
+            head = toks[0]
+            if "=" in head and not head.startswith(("-", "/")) and head.split("=", 1)[0].isidentifier():
+                toks = toks[1:]          # VAR=value prefix
+                continue
+            base = head.rsplit("/", 1)[-1]
+            if base in WRAPPERS:
+                toks = toks[1:]
+                continue
+            break
+        if not toks:
+            continue
+
+        verb = toks[0].rsplit("/", 1)[-1]
+
+        # `bash -c "<command>"` hides the whole command inside a string argument.
+        if verb in SHELL_RUNNERS:
+            for i, t in enumerate(toks[1:], start=1):
+                if t == "-c" and i + 1 < len(toks):
+                    findings.extend(check(toks[i + 1]))
+                    break
+
         args = toks[1:]
         flags = _flags(toks)
 
+        # rsync --delete whose DESTINATION is critical is a different matter.
+        if verb == "rsync" and any(a == "--delete" or a.startswith("--delete") for a in args):
+            positional = [a for a in args if not a.startswith("-")]
+            if positional:
+                crit, why = _is_critical(positional[-1])
+                if crit:
+                    findings.append(("DANGER", f"rsync --delete into a critical path: {why}"))
+
+        if verb == "cd":
+            target = next((a for a in args if not a.startswith("-")), None)
+            if target is not None:
+                crit, _ = _is_critical(target)
+                cwd_is_critical = crit
+            continue
+
         if verb in DESTRUCTIVE_VERBS:
+            hit = False
             for a in args:
                 crit, why = _is_critical(a)
                 if crit:
                     findings.append(("DANGER", f"{verb}: {why}"))
+                    hit = True
                     break
+            if not hit and cwd_is_critical and any(
+                    ch in a for a in args if not a.startswith("-") for ch in "*?["):
+                findings.append(
+                    ("DANGER", f"{verb}: glob in a critical directory entered by an earlier cd"))
         elif verb == "find":
             deletes = bool(re.search(r"-delete\b|-exec\w*\s+(sudo\s+)?(rm|shred|truncate)\b", seg))
             if deletes:

@@ -40,12 +40,42 @@ MUST_FLAG_DANGER = [
     "git clean -fdx",
     "git reset --hard",
     "mv /usr /tmp",
-    "rsync -a --delete / /mnt/backup/",
     ":(){ :|:& };:",                     # fork bomb, real-world spacing
     ":() { :|: & }; :",
     "truncate -s 0 /etc/passwd",
     "shutdown -h now",
     "chmod -R 000 /etc",
+    # --- second round: bypasses an independent verification pass found in the
+    # tokenizer rewrite itself. Every one of these ran `rm` while the verb check
+    # looked at a different first token.
+    "/bin/rm -rf /",
+    "/usr/bin/rm -rf /",
+    'sh -c "rm -rf /"',
+    'bash -c "rm -rf /"',
+    "command rm -rf /",
+    "builtin rm -rf /",
+    "exec rm -rf /",
+    "nohup rm -rf /",
+    "nice rm -rf /",
+    "env rm -rf /",
+    "env x=/ rm -rf $x",
+    "sudo rm -rf /",
+    # `..` traversal: only `/.` was collapsed, so these reached / unseen
+    "rm -rf /usr/../",
+    "rm -rf /etc/../",
+    "rm -rf /../",
+    "rm -rf //",
+    # critical FILES: truncate on /etc/passwd was caught, shred/unlink were not
+    "shred -u /etc/passwd",
+    "shred -f -u -z /etc/sudoers",
+    "unlink /etc/passwd",
+    "rm -f /etc/shadow",
+    # stateful: identical in effect to `rm -rf /`
+    "cd / && rm -rf *",
+    "cd /etc && rm -rf *",
+    "cd /usr; rm -rf *",
+    "rsync -a --delete ./src/ /",
+    "rsync -a --delete ./empty/ /etc/",
 ]
 
 MUST_BE_CLEAN_OF_DANGER = [
@@ -77,6 +107,24 @@ MUST_BE_CLEAN_OF_DANGER = [
     "mv /home/user/a /home/user/b",
     "tail -f server.log",
     "rsync -a ./src/ ./dst/",            # no --delete
+    # --- second round: must NOT be DANGER. rsync --delete on ordinary
+    # directories is a normal incremental backup; flagging it DANGER is the kind
+    # of noise that gets the whole checker ignored (it is a CAUTION instead).
+    "rsync -av --delete /home/user/src/ /home/user/backup/",
+    "rsync -a --delete ./src/ ./dst/",
+    "env FOO=1 python3 app.py",
+    "nice -n 10 make -j4",
+    'sh -c "ls -la"',
+    'bash -c "echo hi"',
+    "shred -u ./secret.txt",
+    "cd ./build && rm -rf *",
+    "cd /tmp/scratch && rm -rf *",
+    "cd ~/proj && rm -rf ./dist",
+    "unlink ./tmpfile",
+    "sudo systemctl restart nginx",
+    # source is / but the DESTINATION is pruned -- a full-system
+    # backup, not a destructive command. CAUTION, not DANGER.
+    "rsync -a --delete / /mnt/backup/",
 ]
 
 
@@ -93,7 +141,16 @@ def main() -> int:
     if worst(check("\x1b[8mrm -rf /\x1b[0m")) != "DANGER":
         fails.append("ANSI-wrapped rm -rf / not detected")
 
-    total = len(MUST_FLAG_DANGER) + len(MUST_BE_CLEAN_OF_DANGER) + 1
+    # ReDoS regression: the fork-bomb pattern was quadratic on ordinary text.
+    # check() runs on every candidate, so a long garbage output would hang the CLI.
+    import time
+    t0 = time.time()
+    check("A" * 200_000)
+    dt = time.time() - t0
+    if dt > 3.0:
+        fails.append(f"ReDoS: check() on 200k chars took {dt:.1f}s")
+
+    total = len(MUST_FLAG_DANGER) + len(MUST_BE_CLEAN_OF_DANGER) + 2
     for f in fails:
         print("  " + f)
     print(f"\n{total - len(fails)}/{total} passed"
