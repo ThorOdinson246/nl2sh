@@ -23,6 +23,7 @@ DEFAULTS = {
     "max_tokens": 64,
     "temperature": 0.0,    # greedy: same question -> same command
     "confirm_execute": True,
+    "host_context": True,   # see hostctx.py: prefix-cached, so effectively free
 }
 
 
