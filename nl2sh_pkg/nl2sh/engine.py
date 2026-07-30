@@ -127,25 +127,43 @@ def start_server(model: Path, server_bin: Path, threads: int,
     raise RuntimeError(f"llama-server did not become ready in {wait:.0f}s; see {log}")
 
 
-def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
-    body = {
-        "messages": [{"role": "system", "content": cfg_mod.SYSTEM_PROMPT},
-                     {"role": "user", "content": prompt}],
-        "max_tokens": cfg.get("max_tokens", 64),
-        "temperature": cfg.get("temperature", 0.0),
-        "stop": STOP,
-    }
-    if n > 1:
-        # Sampling is required for distinct alternatives; greedy would return
-        # the same string n times.
-        body["n"] = n
-        body["temperature"] = max(0.6, float(cfg.get("temperature") or 0))
+def _post(port: int, body: dict) -> list[str]:
     req = urllib.request.Request(
         f"http://{HOST}:{port}/v1/chat/completions",
         data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as r:
         data = json.loads(r.read())
     return [c["message"]["content"] for c in data.get("choices", [])]
+
+
+def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
+    """Greedy answer first, then sampled alternatives.
+
+    Getting this wrong was visible in real use: asking for 3 candidates used to
+    set temperature=0.6 for ALL of them, so the greedy answer -- the one plain
+    `nl2sh` returns -- was absent from its own candidate list, and slot 1 was
+    just a dice roll. Observed: "count lines in all python files" offered
+    `grep -R -l '^$' *.py | wc -l` (counts FILES CONTAINING BLANK LINES) as #1
+    while correct answers sat at #2 and #3. Since callers treat #1 as the pick,
+    slot 1 must always be the model's best single guess.
+    """
+    base = {
+        "messages": [{"role": "system", "content": cfg_mod.SYSTEM_PROMPT},
+                     {"role": "user", "content": prompt}],
+        "max_tokens": cfg.get("max_tokens", 64),
+        "stop": STOP,
+    }
+    out = _post(port, {**base, "temperature": cfg.get("temperature", 0.0)})
+    if n <= 1:
+        return out
+    # Sampling is required for *distinct* alternatives; greedy repeats itself.
+    try:
+        out += _post(port, {**base, "n": n - 1,
+                            "temperature": max(0.6, float(cfg.get("temperature") or 0)),
+                            "top_p": 0.95})
+    except Exception:
+        pass  # alternatives are a bonus; never lose the greedy answer over them
+    return out
 
 
 def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int) -> list[str]:

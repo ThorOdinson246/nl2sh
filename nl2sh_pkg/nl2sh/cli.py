@@ -49,6 +49,27 @@ def print_findings(findings) -> bool:
     return danger
 
 
+def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
+    """Append one query to a local JSONL, for later hand-judging.
+
+    `verdict` is left null deliberately: correctness here can only be decided
+    by a human or by execution in the harness, never by the model that produced
+    the answer.
+    """
+    import datetime
+    import json
+    path = cfg_mod.data_dir() / "queries.jsonl"
+    rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+           "nl": prompt, "candidates": cmds, "latency_s": round(elapsed, 3),
+           "mode": mode, "verdict": None}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # logging must never break the tool
+
+
 def cmd_query(args, cfg: dict) -> int:
     prompt = " ".join(args.words).strip()
     if not prompt:
@@ -91,6 +112,12 @@ def cmd_query(args, cfg: dict) -> int:
     # never printed after messages that refer to it.
     sys.stdout.flush()
 
+    # Opt-in only (`nl2sh config --set log_queries=true`). Shell requests can
+    # contain hostnames, paths and credentials, so this is never on by default
+    # and stays on the local disk.
+    if cfg.get("log_queries"):
+        _log_query(prompt, cmds, elapsed, mode)
+
     if args.timing:
         print(DIM(f"  [{elapsed:.2f}s, {mode} mode]"), file=sys.stderr)
 
@@ -98,7 +125,26 @@ def cmd_query(args, cfg: dict) -> int:
         return 0
 
     # ---- execution path ----
-    chosen = cmds[0]
+    # With several candidates on screen, do NOT assume #1. The numbering only
+    # ranks confidence, and #1 is the greedy answer rather than a verified one;
+    # picking silently would run something the user never chose.
+    if len(cmds) > 1:
+        if not sys.stdin.isatty():
+            print("nl2sh: several candidates -- rerun without -n, or pick one yourself.",
+                  file=sys.stderr)
+            return 6
+        try:
+            pick = input(f"\n{BOLD('Run which?')} [1-{len(cmds)}, or N to cancel] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 130
+        if not pick.isdigit() or not 1 <= int(pick) <= len(cmds):
+            print("nl2sh: not running.", file=sys.stderr)
+            return 0
+        chosen = cmds[int(pick) - 1]
+    else:
+        chosen = cmds[0]
+
     findings = check(chosen)
     danger = any(sev == "DANGER" for sev, _ in findings)
 
