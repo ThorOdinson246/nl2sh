@@ -1,20 +1,54 @@
+# Datasets: nothing under data/ is meant to be tracked (raw scrapes, interim
+# processing, processed splits, jsonl dumps, smoke fixtures). A blanket rule
+# here means a careless `git add -A` cannot pull any of it in even if a new
+# subdirectory shows up that the specific rules below don't yet name.
+data/
 data/raw/
 data/interim/
 data/processed/
 data/*.jsonl
 data/smoke/
+
+# Model weights, in any format we've produced or consumed.
 models/
-slurm_outputs/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+
+# Virtualenvs and Python build/cache noise.
 venv/
 venv_teacher/
 venv_*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# SLURM / cluster job output.
+slurm_outputs/
+*.out
+*.err
+
+# Local build/runtime products.
 runs/
 tools/llama.cpp/
-*.gguf
-*.safetensors
-__pycache__/
 runtime/lib/
 runtime/raw.txt
+
+# Ollama models, wherever a script happens to materialize them.
+ollama_models/
+*.ollama/
+
+# Editor / OS cruft.
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
 
 # Real typed queries -- eval data derived from actual usage. Kept out of git
 # per the standing rule on private eval data (can contain hostnames/paths).
