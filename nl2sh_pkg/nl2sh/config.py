@@ -23,7 +23,9 @@ DEFAULTS = {
     "max_tokens": 64,
     "temperature": 0.0,    # greedy: same question -> same command
     "confirm_execute": True,
-    "host_context": True,   # see hostctx.py: prefix-cached, so effectively free
+    # OFF by default. It is cheap (prefix-cached) but MEASURED HARMFUL on the
+    # only benchmark available: 54.2% -> 45.1% pass, p=0.0004. See hostctx.py.
+    "host_context": False,
 }
 
 

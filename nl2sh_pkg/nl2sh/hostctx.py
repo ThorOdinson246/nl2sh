@@ -26,6 +26,37 @@ session cost into a per-query one. They are appended to the user turn instead.
 Budget: the stable block is capped (see MAX_STABLE_CHARS). The 685-token block
 used in the experiment was deliberately inflated to measure the worst case; a
 real one is ~150 tokens, about 2.4 s of one-time prefill.
+
+STATUS: DISABLED BY DEFAULT, on measurement.
+
+I originally ranked this the highest-value change on the strength of 4 hand-run
+examples. A proper 295-task run reversed that, and the anecdote was simply too
+small to rank on:
+
+    no context   0.849 mean / 54.2% pass
+    context      0.815 mean / 45.1% pass    d=-0.034, McNemar p=0.0004
+
+Two implementation bugs accounted for part of it (a false working-directory claim
+and a key=value format the model read as shell variables); fixing both recovered
+39.0% -> 45.1% but did not close the gap. Ruled out as the cause: only 3 of 41
+regressions involve a tool the context declared missing.
+
+What actually happens is that the extra tokens make a 1.5B model produce more
+elaborate answers, and elaboration breaks simple correct ones:
+    `sha512sum f`            -> `echo -n "f" | sha512sum`   (hashes the NAME)
+    `echo 'hello' > world.txt` -> `touch /testbed/world.txt`  (drops the content)
+    `find .. | xargs wc -l`  -> `find .. -exec wc -l {} \;`  (working idiom traded away)
+
+But the benchmark is close to blind to the BENEFIT this is for. Measured on the
+task text: 73% of ALFA tasks already name a concrete target path, so context is
+pure noise there, and the underspecified 27% are trivia (`ls`, `pwd`, `date`)
+that need no context either. Of real typed queries, 79% are underspecified --
+the opposite distribution.
+
+So ALFA measures this feature's cost in full and its benefit barely. The measured
+harm is real and sufficient reason not to enable it by default; it is NOT
+sufficient reason to conclude the idea is wrong. Revisit only against an eval
+built from underspecified requests.
 """
 from __future__ import annotations
 
