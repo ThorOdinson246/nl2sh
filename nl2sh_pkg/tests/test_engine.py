@@ -95,23 +95,7 @@ class TestWritePrivate:
         engine._write_private(p, "new")
         assert p.read_text() == "new"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "REAL BUG (found by this test suite, not fixed -- out of scope): "
-            "os.open(..., O_CREAT, 0o600) only applies the mode argument when "
-            "it actually CREATES the file. If server.token/.pid/.port already "
-            "exists (stale file from an older nl2sh, a race, or a directory "
-            "that was briefly not 0700) with looser permissions, _write_private "
-            "silently keeps writing into it at the old mode -- it never calls "
-            "os.fchmod the way config.py's save_config() does for exactly this "
-            "reason (see config.py's own comment about this class of bug). So "
-            "a pre-existing, group-readable server.token survives every "
-            "restart still group-readable, leaking the auth token to a "
-            "co-tenant on a shared-NFS-home cluster."
-        ),
-    )
-    def test_pre_existing_loosely_permissioned_file_is_NOT_currently_tightened(self, tmp_path):
+    def test_pre_existing_loosely_permissioned_file_is_tightened(self, tmp_path):
         p = tmp_path / "server.token"
         p.write_text("old")
         os.chmod(p, 0o644)

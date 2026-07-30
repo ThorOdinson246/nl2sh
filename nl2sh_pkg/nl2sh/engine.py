@@ -170,6 +170,16 @@ def _write_private(path: Path, text: str) -> None:
     instead of a silent overwrite of an arbitrary file.
     """
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        # The 0o600 above applies ONLY when open() creates the file. A file that
+        # already exists keeps whatever mode it had, so a stale, group-readable
+        # server.token -- left by an older version, or created before the state
+        # dir was chmod 0700 -- stayed group-readable through every subsequent
+        # restart, on exactly the shared-NFS-home clusters this targets.
+        # config.save_config() already did this; this function did not.
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
     with os.fdopen(fd, "w") as f:
         f.write(text)
 
