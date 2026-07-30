@@ -1,0 +1,223 @@
+"""Model execution, in two modes.
+
+server mode (preferred)
+    A `llama-server` process holds the model in RAM and answers over localhost
+    HTTP. Started lazily on first query and left running.
+
+oneshot mode (fallback)
+    One `llama-cli` invocation per query.
+
+Why the server exists at all: measured in the target udocker environment, a
+one-shot query took 5.5 s wall of which only ~1.2 s was generation -- the rest
+was re-reading the 941 MB model. Keeping the model resident is the difference
+between "feels instant" and "why is this slower than typing it myself".
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+from . import config as cfg_mod
+from .extract import extract
+
+HOST = "127.0.0.1"
+STOP = ["\n", "<|im_end|>", "```"]
+
+
+def _runtime_env() -> dict:
+    """Prepend any bundled shared libs, the way a manylinux wheel would.
+
+    The prebuilt binaries here are compiled against a newer libstdc++ than
+    Ubuntu 22.04 ships (GLIBCXX_3.4.32 vs 3.4.30), so the wheel carries its own.
+    """
+    env = dict(os.environ)
+    bundled = Path(__file__).resolve().parent.parent.parent / "runtime" / "lib"
+    if extra := os.environ.get("NL2SH_RUNTIME_LIB"):
+        bundled = Path(extra)
+    if bundled.is_dir():
+        prev = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{bundled}{':' + prev if prev else ''}"
+    return env
+
+
+def _state_dir() -> Path:
+    d = cfg_mod.data_dir() / "run"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _port_file() -> Path:
+    return _state_dir() / "server.port"
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind((HOST, 0))
+        return s.getsockname()[1]
+
+
+def _alive(port: int, timeout: float = 0.4) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://{HOST}:{port}/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def running_port() -> int | None:
+    p = _port_file()
+    if not p.exists():
+        return None
+    try:
+        port = int(p.read_text().strip())
+    except ValueError:
+        return None
+    return port if _alive(port) else None
+
+
+def stop_server() -> bool:
+    pid_f = _state_dir() / "server.pid"
+    stopped = False
+    if pid_f.exists():
+        try:
+            os.kill(int(pid_f.read_text().strip()), signal.SIGTERM)
+            stopped = True
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+        pid_f.unlink(missing_ok=True)
+    _port_file().unlink(missing_ok=True)
+    return stopped
+
+
+def start_server(model: Path, server_bin: Path, threads: int,
+                 wait: float = 180.0, quiet: bool = False) -> int:
+    if port := running_port():
+        return port
+    port = _free_port()
+    log = _state_dir() / "server.log"
+    cmd = [str(server_bin), "-m", str(model), "--host", HOST, "--port", str(port),
+           "-t", str(threads), "-c", "2048", "--no-webui"]
+    with open(log, "ab") as lf:
+        lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(cmd)}\n".encode())
+        proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                                env=_runtime_env(), start_new_session=True)
+    (_state_dir() / "server.pid").write_text(str(proc.pid))
+    _port_file().write_text(str(port))
+
+    if not quiet:
+        print(f"nl2sh: loading model into memory (first run only)...",
+              file=sys.stderr, end="", flush=True)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"llama-server exited rc={proc.returncode}; see {log}")
+        if _alive(port):
+            if not quiet:
+                print(" ready.", file=sys.stderr, flush=True)
+            return port
+        time.sleep(0.3)
+    raise RuntimeError(f"llama-server did not become ready in {wait:.0f}s; see {log}")
+
+
+def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
+    body = {
+        "messages": [{"role": "system", "content": cfg_mod.SYSTEM_PROMPT},
+                     {"role": "user", "content": prompt}],
+        "max_tokens": cfg.get("max_tokens", 64),
+        "temperature": cfg.get("temperature", 0.0),
+        "stop": STOP,
+    }
+    if n > 1:
+        # Sampling is required for distinct alternatives; greedy would return
+        # the same string n times.
+        body["n"] = n
+        body["temperature"] = max(0.6, float(cfg.get("temperature") or 0))
+    req = urllib.request.Request(
+        f"http://{HOST}:{port}/v1/chat/completions",
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = json.loads(r.read())
+    return [c["message"]["content"] for c in data.get("choices", [])]
+
+
+def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int) -> list[str]:
+    cmd = [str(cli_bin), "-m", str(model), "-sys", cfg_mod.SYSTEM_PROMPT, "-p", prompt,
+           "-st", "--no-display-prompt", "--no-warmup",
+           "--temp", str(cfg.get("temperature", 0.0)),
+           "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads)]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=_runtime_env(), timeout=300)
+    if p.returncode != 0:
+        raise RuntimeError(f"llama-cli rc={p.returncode}: {p.stderr[-400:]}")
+    return [_strip_cli_chrome(p.stdout)]
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def _strip_cli_chrome(out: str) -> str:
+    """Pull the answer out of llama-cli's interactive stdout.
+
+    llama-cli in single-turn mode still runs its conversation UI, so stdout is
+    a banner, a load spinner, an echo of the prompt as `> <prompt>`, the answer,
+    then a throughput footer. `--no-display-prompt` does NOT suppress the echo.
+    The answer is what lies between the last `> ` line and the footer.
+    """
+    text = _ANSI_RE.sub("", out.replace("\r", "\n"))
+    lines = text.splitlines()
+    start = 0
+    for i, line in enumerate(lines):
+        if line.startswith("> "):
+            start = i + 1
+    body = []
+    for line in lines[start:]:
+        if line.startswith("[ Prompt:") or line.startswith("Exiting..."):
+            break
+        body.append(line)
+    return "\n".join(body).strip()
+
+
+def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
+             quiet: bool = False) -> tuple[list[str], float, str]:
+    """Return (commands, elapsed_seconds, mode). Commands are already extracted."""
+    model = cfg_mod.find_model()
+    if model is None:
+        raise FileNotFoundError("no model found -- run `nl2sh setup`")
+    threads = cfg_mod.resolve_threads(cfg)
+
+    server_bin = None
+    if not force_oneshot:
+        sb = os.environ.get("NL2SH_LLAMA_SERVER")
+        if sb and Path(sb).exists():
+            server_bin = Path(sb)
+        elif (c := cfg_mod.data_dir() / "bin" / "llama-server").exists():
+            server_bin = c
+        elif (c := Path(cfg.get("llama_server", "/nonexistent"))).exists():
+            server_bin = c
+
+    t0 = time.time()
+    if server_bin is not None:
+        port = start_server(model, server_bin, threads, quiet=quiet)
+        raws = _query_server(port, prompt, cfg, n)
+        mode = "server"
+    else:
+        cli = cfg_mod.find_llama_cli()
+        if cli is None:
+            raise FileNotFoundError("neither llama-server nor llama-cli found -- run `nl2sh doctor`")
+        raws = _query_oneshot(model, cli, prompt, cfg, threads)
+        mode = "oneshot"
+
+    cmds, seen = [], set()
+    for r in raws:
+        c = extract(r)
+        if c and c not in seen:
+            seen.add(c)
+            cmds.append(c)
+    return cmds, time.time() - t0, mode

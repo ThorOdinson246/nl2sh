@@ -13,3 +13,5 @@ tools/llama.cpp/
 *.gguf
 *.safetensors
 __pycache__/
+runtime/lib/
+runtime/raw.txt

@@ -1,0 +1,345 @@
+"""nl2sh -- natural language to shell command, fully local.
+
+Usage:
+    nl2sh look at current queued tasks in slurm
+    nl2sh "find files over 100MB modified this week"
+    nl2sh -n 3 compress this folder      # show alternatives
+    nl2sh -e count lines in every python file   # run it, after confirming
+
+Subcommands: setup, doctor, stop, config
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from . import config as cfg_mod
+from . import engine
+from .safety import check
+
+# Colour only when attached to a terminal, and honour NO_COLOR.
+_TTY = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _c(code: str, s: str) -> str:
+    return f"\033[{code}m{s}\033[0m" if _TTY else s
+
+
+BOLD = lambda s: _c("1", s)
+DIM = lambda s: _c("2", s)
+RED = lambda s: _c("1;31", s)
+YELLOW = lambda s: _c("33", s)
+GREEN = lambda s: _c("32", s)
+CYAN = lambda s: _c("36", s)
+
+
+def print_findings(findings) -> bool:
+    """Print safety findings. Returns True if any were DANGER."""
+    danger = False
+    for sev, why in findings:
+        if sev == "DANGER":
+            danger = True
+            print(f"  {RED('!! DANGER')}  {why}", file=sys.stderr)
+        else:
+            print(f"  {YELLOW('!  caution')} {why}", file=sys.stderr)
+    return danger
+
+
+def cmd_query(args, cfg: dict) -> int:
+    prompt = " ".join(args.words).strip()
+    if not prompt:
+        print("nl2sh: nothing to do -- give me a request in plain English", file=sys.stderr)
+        return 2
+
+    try:
+        cmds, elapsed, mode = engine.generate(
+            prompt, cfg, n=args.num, force_oneshot=args.oneshot, quiet=args.quiet)
+    except FileNotFoundError as e:
+        print(f"nl2sh: {e}", file=sys.stderr)
+        return 3
+    except Exception as e:
+        print(f"nl2sh: generation failed: {e}", file=sys.stderr)
+        return 4
+
+    if not cmds:
+        print("nl2sh: the model returned nothing usable. Try rephrasing.", file=sys.stderr)
+        return 5
+
+    # --quiet prints the bare command and nothing else, so it composes:
+    #   eval "$(nl2sh -q ...)"   /   x=$(nl2sh -q ...)
+    if args.quiet:
+        print(cmds[0])
+        return 0
+
+    for i, c in enumerate(cmds):
+        label = f"{DIM(f'{i+1}.')} " if len(cmds) > 1 else ""
+        print(f"{label}{BOLD(CYAN(c))}")
+        findings = check(c)
+        if findings:
+            # The command goes to stdout and warnings to stderr (so that
+            # `nl2sh ... | sh` still works). Without this flush the two streams
+            # interleave and the warning appears ABOVE the command it is about.
+            sys.stdout.flush()
+            print_findings(findings)
+            sys.stderr.flush()
+
+    if args.timing:
+        print(DIM(f"  [{elapsed:.2f}s, {mode} mode]"), file=sys.stderr)
+
+    if not args.execute:
+        return 0
+
+    # ---- execution path ----
+    chosen = cmds[0]
+    findings = check(chosen)
+    danger = any(sev == "DANGER" for sev, _ in findings)
+
+    if danger:
+        print(f"\n{RED('Refusing to auto-run a command flagged DANGER.')}", file=sys.stderr)
+        print(DIM("Copy it and run it yourself if you are certain."), file=sys.stderr)
+        return 6
+
+    if cfg.get("confirm_execute", True):
+        if not sys.stdin.isatty():
+            print("nl2sh: refusing to execute without an interactive confirmation.", file=sys.stderr)
+            return 6
+        try:
+            ans = input(f"\n{BOLD('Run this?')} [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 130
+        if ans not in ("y", "yes"):
+            print("nl2sh: not running.", file=sys.stderr)
+            return 0
+
+    print(DIM(f"$ {chosen}"), file=sys.stderr)
+    shell = os.environ.get("SHELL", "/bin/bash")
+    return subprocess.run([shell, "-c", chosen]).returncode
+
+
+def cmd_setup(args, cfg: dict) -> int:
+    print(BOLD("nl2sh setup"))
+    models_dir = cfg_mod.data_dir() / "models"
+    bin_dir = cfg_mod.data_dir() / "bin"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    target = models_dir / cfg_mod.MODEL_NAME
+    if target.exists():
+        print(f"  model already present: {target} "
+              f"({target.stat().st_size / 1e6:.0f} MB)")
+    elif args.model:
+        src = Path(args.model).expanduser().resolve()
+        if not src.exists():
+            print(f"  {RED('no such file')}: {src}", file=sys.stderr)
+            return 1
+        # Symlink rather than copy: the model is ~1 GB and on this cluster it
+        # lives on shared storage already.
+        if args.copy:
+            print(f"  copying {src} -> {target} (~1 GB, please wait)")
+            shutil.copy2(src, target)
+        else:
+            target.symlink_to(src)
+            print(f"  linked model: {target} -> {src}")
+    else:
+        print(f"  {YELLOW('no model yet.')} Provide one with:")
+        print(f"    nl2sh setup --model /path/to/{cfg_mod.MODEL_NAME}")
+        print(DIM("  (a released build would download it from the model hub here)"))
+
+    for name, envvar in (("llama-server", "NL2SH_LLAMA_SERVER"),
+                         ("llama-cli", "NL2SH_LLAMA_CLI")):
+        dest = bin_dir / name
+        src = os.environ.get(envvar) or (args.bin_dir and str(Path(args.bin_dir) / name))
+        if dest.exists():
+            print(f"  runtime present: {dest}")
+        elif src and Path(src).exists():
+            dest.symlink_to(Path(src).resolve())
+            print(f"  linked runtime: {dest} -> {src}")
+
+    cfg.setdefault("threads", 0)
+    p = cfg_mod.save_config(cfg)
+    print(f"  config written: {p}")
+    print(f"  threads: {cfg_mod.resolve_threads(cfg)} "
+          + DIM(f"(of {os.cpu_count()} cores; decode is memory-bound, not core-bound)"))
+    print(f"\n{GREEN('Ready.')} Try:  nl2sh look at current queued tasks in slurm")
+    return 0
+
+
+def cmd_doctor(args, cfg: dict) -> int:
+    print(BOLD("nl2sh doctor"))
+    ok = True
+
+    model = cfg_mod.find_model()
+    if model:
+        print(f"  {GREEN('ok')}    model      {model} ({model.stat().st_size / 1e6:.0f} MB)")
+    else:
+        print(f"  {RED('FAIL')}  model      not found -- run `nl2sh setup --model ...`")
+        ok = False
+
+    srv = os.environ.get("NL2SH_LLAMA_SERVER") or str(cfg_mod.data_dir() / "bin" / "llama-server")
+    if Path(srv).exists():
+        print(f"  {GREEN('ok')}    server     {srv}")
+    else:
+        print(f"  {YELLOW('warn')}  server     not found -- falling back to slow one-shot mode")
+
+    cli = cfg_mod.find_llama_cli()
+    print(f"  {GREEN('ok') if cli else RED('FAIL')}    cli        {cli or 'not found'}")
+    ok = ok and bool(cli or Path(srv).exists())
+
+    bundled = Path(__file__).resolve().parent.parent.parent / "runtime" / "lib"
+    print(f"  {'ok' if bundled.is_dir() else 'warn'}    libs       "
+          f"{bundled if bundled.is_dir() else 'using system libstdc++'}")
+
+    port = engine.running_port()
+    print(f"  {'ok' if port else 'idle'}  server pid {'listening on ' + str(port) if port else 'not running'}")
+    print(f"  info  threads    {cfg_mod.resolve_threads(cfg)} (of {os.cpu_count()} cores)")
+    print(f"  info  config     {cfg_mod.config_path()}")
+    print(f"\n{GREEN('All good.') if ok else RED('Not ready.')}")
+    return 0 if ok else 1
+
+
+def cmd_stop(args, cfg: dict) -> int:
+    print("nl2sh: server stopped." if engine.stop_server() else "nl2sh: no server running.")
+    return 0
+
+
+def cmd_config(args, cfg: dict) -> int:
+    if args.set:
+        for kv in args.set:
+            if "=" not in kv:
+                print(f"nl2sh: expected key=value, got {kv!r}", file=sys.stderr)
+                return 2
+            k, v = kv.split("=", 1)
+            if v.lower() in ("true", "false"):
+                cfg[k] = v.lower() == "true"
+            else:
+                try:
+                    cfg[k] = int(v)
+                except ValueError:
+                    try:
+                        cfg[k] = float(v)
+                    except ValueError:
+                        cfg[k] = v
+        print(f"nl2sh: wrote {cfg_mod.save_config(cfg)}")
+    for k in sorted(cfg):
+        print(f"  {k} = {cfg[k]}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="nl2sh", description="Natural language to shell command, fully local. No network.",
+        epilog="examples:\n"
+               "  nl2sh look at current queued tasks in slurm\n"
+               "  nl2sh -n 3 'find files bigger than 100MB'\n"
+               "  nl2sh -e 'count lines in every python file'\n"
+               "  eval \"$(nl2sh -q 'show disk usage')\"",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("words", nargs="*", help="your request, in plain English")
+    ap.add_argument("-n", "--num", type=int, default=1, metavar="N",
+                    help="show N alternative commands (default 1)")
+    ap.add_argument("-e", "--execute", action="store_true",
+                    help="run the command after confirming (never auto-runs DANGER)")
+    ap.add_argument("-q", "--quiet", action="store_true",
+                    help="print only the bare command, for $(...) use")
+    ap.add_argument("-t", "--timing", action="store_true", help="report latency")
+    ap.add_argument("--oneshot", action="store_true",
+                    help="bypass the resident server (slower; for debugging)")
+
+    sub = ap.add_subparsers(dest="sub")
+    s = sub.add_parser("setup", help="first-run setup")
+    s.add_argument("--model", help="path to the GGUF model")
+    s.add_argument("--bin-dir", help="directory containing llama-server / llama-cli")
+    s.add_argument("--copy", action="store_true", help="copy the model instead of symlinking")
+    s.set_defaults(func=cmd_setup)
+
+    sub.add_parser("doctor", help="check the installation").set_defaults(func=cmd_doctor)
+    sub.add_parser("stop", help="stop the resident model server").set_defaults(func=cmd_stop)
+    c = sub.add_parser("config", help="show or change settings")
+    c.add_argument("--set", nargs="+", metavar="K=V")
+    c.set_defaults(func=cmd_config)
+    return ap
+
+
+SUBCOMMANDS = {"setup", "doctor", "stop", "config"}
+_FLAGS_NOARG = {"-e", "--execute", "-q", "--quiet", "-t", "--timing", "--oneshot"}
+_FLAGS_ARG = {"-n", "--num"}
+
+
+class QueryArgs:
+    """Hand-parsed query invocation.
+
+    argparse cannot be used for the query path. Two reasons, both found by
+    actually typing realistic requests:
+      1. A subparser turns any trailing word that happens to name a
+         subcommand into one -- `nl2sh look at queued tasks in slurm` died
+         with "invalid choice: 'slurm'".
+      2. Real requests contain things that look like flags
+         (`find files -name test`), which argparse would reject.
+    So: consume flags only while they appear BEFORE the request text, then
+    take everything remaining verbatim.
+    """
+
+    def __init__(self, argv: list[str]):
+        self.num, self.execute, self.quiet = 1, False, False
+        self.timing, self.oneshot = False, False
+        i = 0
+        while i < len(argv):
+            a = argv[i]
+            if a == "--":                      # explicit end of flags
+                i += 1
+                break
+            if a in _FLAGS_NOARG:
+                setattr(self, {"-e": "execute", "--execute": "execute",
+                               "-q": "quiet", "--quiet": "quiet",
+                               "-t": "timing", "--timing": "timing",
+                               "--oneshot": "oneshot"}[a], True)
+            elif a in _FLAGS_ARG:
+                if i + 1 >= len(argv):
+                    raise ValueError(f"{a} needs a number")
+                self.num = int(argv[i + 1])
+                i += 1
+            elif a.startswith("-n") and len(a) > 2 and a[2:].isdigit():
+                self.num = int(a[2:])          # -n3
+            else:
+                break                          # request text starts here
+            i += 1
+        self.words = argv[i:]
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    cfg = cfg_mod.load_config()
+
+    if not argv:
+        build_parser().print_help()
+        return 0
+
+    # A subcommand only counts as one when it is the very first token, so
+    # `nl2sh config` manages settings while `nl2sh show me the git config`
+    # stays a question.
+    if argv[0] in SUBCOMMANDS:
+        args = build_parser().parse_args(argv)
+        return args.func(args, cfg)
+
+    if argv[0] in ("-h", "--help"):
+        build_parser().print_help()
+        return 0
+
+    try:
+        args = QueryArgs(argv)
+    except ValueError as e:
+        print(f"nl2sh: {e}", file=sys.stderr)
+        return 2
+    if not args.words:
+        build_parser().print_help()
+        return 0
+    return cmd_query(args, cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

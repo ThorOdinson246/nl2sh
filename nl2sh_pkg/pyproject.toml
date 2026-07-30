@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nl2sh"
+version = "0.1.0"
+description = "Natural language to shell command, fully local and fast. No API keys, no network."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ThorOdinson246" }]
+keywords = ["shell", "cli", "llm", "local", "bash"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Shells",
+]
+# Deliberately zero runtime dependencies: stdlib urllib talks to the local
+# server, so `pip install nl2sh` cannot break someone's environment.
+dependencies = []
+
+[project.scripts]
+nl2sh = "nl2sh.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nl2sh*"]
