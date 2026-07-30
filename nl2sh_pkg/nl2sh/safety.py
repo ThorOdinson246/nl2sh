@@ -42,16 +42,49 @@ DANGER = [
 
 WRITES_OUTSIDE_CWD = re.compile(r"(>|>>|\b(cp|mv|rm|tee|truncate|chown|chmod)\b)[^|]*\s/(etc|usr|var|boot|lib|sbin|bin)/")
 
+# Angle-bracket placeholders are documentation, not shell syntax. Stripping them
+# first fixes a false positive found in real output: the `>` inside
+# `docker exec -it <container-id> /bin/bash` was read as a redirect into /bin/.
+PLACEHOLDER_RE = re.compile(r"<[^<>\s][^<>]*>")
+
+CAUTIONS = [
+    # A PID taken from a parsed column is only a PID if the column was right.
+    # Observed twice, both wrong: `netstat ... | awk '{print $NF}' | xargs kill -9`
+    # ($NF is the connection state) and `docker ps -a | awk '{print $1}'`
+    # (row 1 is the CONTAINER header).
+    (re.compile(r"\b(awk|cut|sed)\b[^|]*\|\s*xargs\b[^|]*\b(kill|docker\s+rm|rm)\b"),
+     "kills/removes using a field parsed from text -- verify the column is really an ID"),
+    # ping with no -c never exits; the user has to notice and Ctrl-C.
+    (re.compile(r"^\s*(sudo\s+)?ping\b(?!.*\s-[a-zA-Z]*c\b)(?!.*\s-c\d)"),
+     "ping without -c runs until you interrupt it"),
+    # This tool is offline by design; a suggestion that leaves the machine is
+    # worth naming. Observed: `curl -s http://whatismyip.org | sed ...`.
+    (re.compile(r"\b(curl|wget)\b[^|]*\b(https?://|[a-z0-9-]+\.[a-z]{2,})"),
+     "contacts the network"),
+    (re.compile(r"\bdocker\s+system\s+prune\b.*\s-a\b|\bdocker\s+system\s+prune\s+-a"),
+     "docker system prune -a removes all unused images, not just dangling ones"),
+]
+
 
 def split_segments(command: str):
     """Split on shell operators so each clause is checked independently."""
     return [s.strip() for s in re.split(r"(?:\|\||&&|[;|])", command) if s.strip()]
 
 
+def _for_analysis(command: str) -> str:
+    """Blank out <placeholder> spans so they cannot fake shell metacharacters."""
+    return PLACEHOLDER_RE.sub("PLACEHOLDER", command)
+
+
 def check(command: str):
     """Return a list of (severity, reason) findings. Empty means nothing flagged."""
     findings = []
-    for seg in split_segments(command):
+    # Whole-command cautions (a pipeline is the unit of meaning for these).
+    whole = _for_analysis(command)
+    for pat, why in CAUTIONS:
+        if pat.search(whole):
+            findings.append(("CAUTION", why))
+    for seg in split_segments(whole):
         for pat, why in DANGER:
             if pat.search(seg):
                 findings.append(("DANGER", why))

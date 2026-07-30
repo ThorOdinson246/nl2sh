@@ -133,7 +133,7 @@ def _post(port: int, body: dict) -> list[str]:
         data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as r:
         data = json.loads(r.read())
-    return [c["message"]["content"] for c in data.get("choices", [])]
+    return [(c["message"]["content"], c.get("finish_reason")) for c in data.get("choices", [])]
 
 
 def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
@@ -152,6 +152,13 @@ def _query_server(port: int, prompt: str, cfg: dict, n: int) -> list[str]:
                      {"role": "user", "content": prompt}],
         "max_tokens": cfg.get("max_tokens", 64),
         "stop": STOP,
+        # Greedy decoding on this model reliably degenerates into flag spam on
+        # some requests -- `zip up this project` produced
+        # `zip -r -9 -q -n -j -0 -9 -n -j -0 ...` on 2 of 2 attempts, which is
+        # reproducible rather than unlucky. A small penalty breaks the loop
+        # without meaningfully changing well-behaved outputs.
+        "repeat_penalty": cfg.get("repeat_penalty", 1.08),
+        "repeat_last_n": 64,
     }
     out = _post(port, {**base, "temperature": cfg.get("temperature", 0.0)})
     if n <= 1:
@@ -174,7 +181,8 @@ def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: 
     p = subprocess.run(cmd, capture_output=True, text=True, env=_runtime_env(), timeout=300)
     if p.returncode != 0:
         raise RuntimeError(f"llama-cli rc={p.returncode}: {p.stderr[-400:]}")
-    return [_strip_cli_chrome(p.stdout)]
+    # one-shot mode gives no finish_reason; treat as unknown
+    return [(_strip_cli_chrome(p.stdout), None)]
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
@@ -200,6 +208,21 @@ def _strip_cli_chrome(out: str) -> str:
             break
         body.append(line)
     return "\n".join(body).strip()
+
+
+def looks_degenerate(cmd: str, min_repeats: int = 4) -> bool:
+    """Detect flag-spam loops that a length stop alone would miss.
+
+    Catches the reproducible `zip` failure even when it happens to terminate:
+    `zip -r -9 -q -n -j -0 -9 -n -j -0 -9 -n -j -0 ...`. Keyed on a token
+    repeating far more often than any real command repeats an argument.
+    """
+    toks = cmd.split()
+    if len(toks) < 8:
+        return False
+    from collections import Counter
+    counts = Counter(t for t in toks if t.startswith("-"))
+    return bool(counts) and counts.most_common(1)[0][1] >= min_repeats
 
 
 def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
@@ -233,9 +256,17 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         mode = "oneshot"
 
     cmds, seen = [], set()
-    for r in raws:
-        c = extract(r)
-        if c and c not in seen:
-            seen.add(c)
-            cmds.append(c)
+    for raw, finish in raws:
+        c = extract(raw)
+        if not c or c in seen:
+            continue
+        # A generation that stopped because it ran out of budget is not a
+        # finished command, and must not be presented as one. The observed case
+        # was `zip -r -9 -q -m -j -0 -1 -1 ...`: truncated mid-flag-spam, yet it
+        # still carried `-m`, which DELETES the source files. Showing that as an
+        # answer is worse than showing nothing.
+        if finish == "length" or looks_degenerate(c):
+            continue
+        seen.add(c)
+        cmds.append(c)
     return cmds, time.time() - t0, mode
