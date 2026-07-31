@@ -66,3 +66,16 @@ scripts/icalfa_feasibility/*.log
 # tracked; their outputs are not.
 scripts/icalfa_udocker/*.jsonl
 scripts/icalfa_udocker/*.log
+
+# LaTeX build artifacts for paper/main.tex. The .tex/.bib/.sty/.bst sources
+# are tracked; everything pdflatex/bibtex regenerates is not.
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+paper/*.toc
+paper/main.pdf
