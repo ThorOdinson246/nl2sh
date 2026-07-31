@@ -85,3 +85,7 @@ handoff/
 
 # Internal review notes -- working documents, not release artifacts.
 paper/review_*.md
+
+# udocker per-job TMPDIR (see scripts/icalfa_udocker/udocker_shim.py)
+scratch/
+thirdparty/
