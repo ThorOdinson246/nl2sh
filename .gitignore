@@ -88,4 +88,16 @@ paper/review_*.md
 
 # udocker per-job TMPDIR (see scripts/icalfa_udocker/udocker_shim.py)
 scratch/
-thirdparty/
+thirdparty/*
+# Cluster job scripts and vendored third-party benchmarks.
+# Every .sbatch here hardcodes this project's SLURM environment -- absolute
+# /homes paths, the suliaoma/node partitions, the bxmarg QOS and gpu003 -- so
+# it is unrunnable elsewhere and leaks local paths. The methods they wrap are
+# described in the paper and implemented in the tracked Python; the schedulers
+# are not part of the released artifact.
+*.sbatch
+
+# Vendored upstream benchmark (IBM/nl2bash-eabench). Redistributed under its
+# own licence upstream; not ours to re-ship. Fetch it separately -- see
+# docs/EVAL_HARNESS.md.
+third_party/
