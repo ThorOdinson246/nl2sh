@@ -115,9 +115,13 @@ docs/               design decisions, measurements, and project history
 ```
 
 Scripts under `scripts/` were written for a specific SLURM cluster and are
-kept as-is for reproducibility and auditability, not as a portable
-pipeline — several `.sbatch` files hardcode cluster paths and partition
-names.
+kept as-is for reproducibility and auditability, not as a portable pipeline.
+The SLURM job scripts themselves are **not** published: every one hardcoded
+absolute paths, partition names, a QOS and a nodelist specific to one
+cluster, so they were unrunnable elsewhere and served only to leak local
+filesystem layout. The Python they scheduled is tracked and is the part that
+carries the method; anyone reproducing this will need to write their own job
+submission for their own scheduler.
 
 ## Reproducing the benchmark
 
@@ -134,8 +138,8 @@ that ran it.
 `docs/DATASETS.md` documents where the training pool comes from and how it
 was cleaned and de-contaminated; `docs/DISTILLATION.md` covers the
 teacher-data generation approach and the literature it draws on.
-`scripts/train/train_lora.py` (driven by the `.sbatch` files alongside it)
-runs the LoRA SFT; `scripts/train/merge_lora.py` merges the adapter back
+`scripts/train/train_lora.py` runs the LoRA SFT (invoked from a scheduler
+job; see the note above on why those are not published); `scripts/train/merge_lora.py` merges the adapter back
 into the base model before GGUF export via `scripts/export/`.
 
 ## Further reading
