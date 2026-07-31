@@ -82,3 +82,6 @@ paper/main.pdf
 
 # Session handoff notes -- working documents, not part of the release.
 handoff/
+
+# Internal review notes -- working documents, not release artifacts.
+paper/review_*.md
