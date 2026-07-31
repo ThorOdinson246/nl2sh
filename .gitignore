@@ -79,3 +79,6 @@ paper/*.fdb_latexmk
 paper/*.synctex.gz
 paper/*.toc
 paper/main.pdf
+
+# Session handoff notes -- working documents, not part of the release.
+handoff/
