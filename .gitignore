@@ -101,3 +101,6 @@ thirdparty/*
 # own licence upstream; not ours to re-ship. Fetch it separately -- see
 # docs/EVAL_HARNESS.md.
 third_party/
+
+# Research and working notes, not part of the released tool.
+docs/

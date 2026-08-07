@@ -50,7 +50,7 @@ repo-wide (e.g. a `.gitignore` chore, a root README update).
 | `eval` | `scripts/eval/`, benchmark harness, scoring |
 | `data` | `scripts/data/`, dataset assembly and cleaning |
 | `train` | `scripts/train/`, `scripts/distill/` — training and distillation |
-| `docs` | anything under `docs/`, the root `README.md`, package `README.md` |
+| `docs` | the root `README.md`, package `README.md`, contributor guides |
 | `ci` | `.github/`, `pyproject.toml`, packaging/release config |
 
 ## Examples, drawn from this project's own history
@@ -87,9 +87,9 @@ Retrain on the ALFA-augmented pool: 0.560 -> 0.617 official, p=0.043
 feat(train): retrain on ALFA-augmented pool, 0.560 -> 0.617 official
 
 Paired McNemar on the same 300 tasks: b=40 new wins, c=23 old wins,
-p=0.043. A 941 MB 1.5B model now edges the untuned 7B (0.617 vs
-0.61). See docs/PRIOR_ART.md section 7 for the full breakdown,
-including the 23 regressions.
+p=0.043. The 941 MB 1.5B model is now indistinguishable from the
+untuned 7B (0.620 vs 0.613, p=0.91). Per-task outputs for both arms
+are in scripts/icalfa_udocker/, including the 23 regressions.
 ```
 
 ---
