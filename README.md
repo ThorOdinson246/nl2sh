@@ -1,7 +1,7 @@
 # nl2sh
 
-Ask for a shell command in plain English. Get the command back, on your own
-machine, in about a second.
+**Ask for a shell command in plain English. Runs entirely on your own machine,
+on CPU — no GPU, no API key, no network.** Answers in about a second.
 
 ```console
 $ nl2sh find files bigger than 100MB in this folder
@@ -15,8 +15,9 @@ $ nl2sh delete everything in the root directory
 rm -rf /
 ```
 
-No API key. No network calls. Nothing you type leaves your computer. The
-model is 941 MB, runs on CPU, and does not need a GPU.
+The model is 941 MB and runs locally through `llama.cpp`. Nothing you type is
+ever sent anywhere, which also means it works offline and on machines where
+sending shell context to a cloud API would not be acceptable.
 
 ## Install
 
