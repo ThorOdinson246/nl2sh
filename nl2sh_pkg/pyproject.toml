@@ -9,7 +9,7 @@ description = "Natural language to shell command, fully local and fast. No API k
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
-authors = [{ name = "ThorOdinson246" }]
+authors = [{ name = "Mukesh Poudel" }]
 keywords = ["shell", "cli", "llm", "local", "bash"]
 classifiers = [
   "Environment :: Console",
@@ -27,6 +27,10 @@ dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.5", "build>=1"]
 
 [project.scripts]
 nl2sh = "nl2sh.cli:main"
+
+[tool.setuptools]
+# Apache-2.0 requires the NOTICE to travel with every redistribution.
+license-files = ["LICENSE", "NOTICE"]
 
 [tool.setuptools.packages.find]
 include = ["nl2sh*"]

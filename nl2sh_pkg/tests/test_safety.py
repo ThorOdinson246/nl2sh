@@ -177,6 +177,63 @@ MUST_BE_CLEAN_OF_DANGER = [
     "dd if=/dev/zero of=./scratch.img bs=1M count=10",
     "rm -rf *.tmp",
     "rm -f *.log",
+    # --- guards for the permission/scope rules added alongside the block below ---
+    "chmod 644 README.md",
+    "chmod -R 755 ./mysite",
+    r"find . -type f -exec chmod 644 {} +",
+    r"find ./build -name '*.o' -exec chown me {} \;",
+    "cd /tmp/work && rm -rf *",          # absolute cd re-anchors; not an ascent
+    "crontab -e",
+    "crontab -l",
+    "useradd bob",
+    # --- guards for the lockout / key-exposure / essential-package rules ---
+    "chmod 600 ~/.ssh/id_rsa",              # the CORRECT key permission
+    "chmod 400 ~/.ssh/id_ed25519",
+    "cat newkey >> ~/.ssh/authorized_keys", # appending is the safe idiom
+    "cat newkey | tee -a ~/.ssh/authorized_keys",
+    "apt remove nginx",
+    "sudo apt-get remove libc6-dev",        # a build dep, not libc6 itself
+    "apt autoremove",
+    "git gc",
+    "git gc --aggressive",
+    "git reflog",
+    "iptables -L -n",
+    "iptables -A INPUT -p tcp --dport 22 -j ACCEPT",
+    "deluser bob",                          # no --remove-* flag
+]
+
+# Confirmed misses where a rule was keyed to the wrong thing: to the deleting
+# VERB rather than the destructive EFFECT (find -exec chmod), to the -R FLAG
+# rather than the target (chmod 777 /etc), or to a path list that stopped one
+# level too high (/var/log under /var, /home/alice under /home).
+MUST_FLAG_DANGER_PERMS_AND_SCOPE = [
+    r"find / -type f -exec chmod 666 {} \;",   # world-writable system, unflagged
+    r"find / -exec chown $USER {} \;",
+    r"find /var/log/ -type f -exec rm {} \;",  # /var critical, /var/log was not
+    "rm -rf /home/myself",                     # /home critical, /home/alice was not
+    "cd .. && cd .. && rm -rf *",              # ascent defeated both cwd guards
+    "chmod 777 /etc",                          # only the literal `chmod 000 /` was caught
+    "chown -R nobody /var/lib",
+    "crontab -r",                              # one keystroke from crontab -e
+    "userdel -r bob",
+]
+
+# Destructive operations no path or verb check reached: lockout, key exposure,
+# and removal of the packages a system needs to repair itself. The first entry
+# is why synonyms are listed explicitly -- covering `userdel -r` alone left
+# Debian's `deluser --remove-all-files` wide open.
+MUST_FLAG_DANGER_LOCKOUT_AND_ESSENTIALS = [
+    "sudo deluser --remove-all-files bob",     # synonym for userdel -r
+    "iptables -F && iptables -X",              # remote lockout
+    "nft flush ruleset",
+    "cat k2 | grep -v mykey > ~/.ssh/authorized_keys",   # truncates your own key
+    "cat newkey | tee ~/.ssh/authorized_keys",           # tee without -a
+    "chmod 644 ~/.ssh/private_key",            # exposes the key; ssh then rejects it
+    "chmod 777 ~/.ssh/id_rsa",
+    "apt remove dpkg",                         # machine cannot install its way back
+    "sudo apt-get purge coreutils",
+    "git reflog expire --expire=now --all",    # git's only unrecoverable operation
+    "git gc --prune=now",
 ]
 
 
@@ -199,7 +256,8 @@ MUST_NOT_CAUTION_KILL = [
 
 def main() -> int:
     fails = []
-    for c in MUST_FLAG_DANGER:
+    for c in (MUST_FLAG_DANGER + MUST_FLAG_DANGER_PERMS_AND_SCOPE
+              + MUST_FLAG_DANGER_LOCKOUT_AND_ESSENTIALS):
         if worst(check(c)) != "DANGER":
             fails.append(f"MISSED (should be DANGER): {c!r} -> {check(c)}")
     for c in MUST_BE_CLEAN_OF_DANGER:
@@ -226,7 +284,8 @@ def main() -> int:
     if dt > 3.0:
         fails.append(f"ReDoS: check() on 200k chars took {dt:.1f}s")
 
-    total = (len(MUST_FLAG_DANGER) + len(MUST_BE_CLEAN_OF_DANGER)
+    total = (len(MUST_FLAG_DANGER) + len(MUST_FLAG_DANGER_PERMS_AND_SCOPE)
+             + len(MUST_FLAG_DANGER_LOCKOUT_AND_ESSENTIALS) + len(MUST_BE_CLEAN_OF_DANGER)
              + len(MUST_CAUTION) + len(MUST_NOT_CAUTION_KILL) + 2)
     for f in fails:
         print("  " + f)

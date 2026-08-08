@@ -156,7 +156,25 @@ and run in CI on Python 3.9 through 3.12.
 ## Licence
 
 Apache-2.0 for this code. The model derives from Qwen2.5-Coder-1.5B-Instruct,
-also Apache-2.0. Training data is assembled from tldr-pages (CC-BY 4.0),
-NL2Bash (GPLv3), Fig autocomplete specs (MIT), Warp workflows (Apache 2.0) and
-the NL2SH-ALFA published training split (MIT), deduplicated and audited for
-contamination against the benchmark test set.
+also Apache-2.0.
+
+Training data, by measured row share of the 125,770-row pool:
+
+| source | share | licence |
+|---|---|---|
+| Fig autocomplete specs | 32.8% | MIT |
+| tldr-pages | 23.1% | CC-BY-4.0 |
+| NL2SH-ALFA training split | 18.0% | MIT |
+| cli-commands-explained | 11.8% | CC0-1.0 *(declared, unverified)* |
+| command-generation | 7.3% | Apache-2.0 *(declared, unverified)* |
+| git-instruction | 7.1% | MIT *(declared, unverified)* |
+
+5.67% is verbatim NL2Bash arriving via the ALFA split — its `data/bash` is MIT,
+not GPL. Warp workflows are not used. The three *declared* sources have licences
+we could not independently confirm. Deduplicated, and 0 exact/fuzzy matches
+against the benchmark test set.
+
+**Attribution:** includes content from
+[tldr-pages](https://github.com/tldr-pages/tldr) under
+[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) (page content is
+CC-BY-4.0; only `scripts/` is MIT).
