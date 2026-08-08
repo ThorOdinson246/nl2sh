@@ -1,0 +1,27 @@
+nl2sh
+Copyright 2026 Mukesh Poudel
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy of
+the License at http://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+The model weights are a LoRA fine-tune of Qwen2.5-Coder-1.5B-Instruct,
+Copyright Alibaba Cloud, used under the Apache License, Version 2.0.
+
+Training data, by measured share of the 125,770-row pool:
+
+  32.8%  Fig autocomplete specs      MIT
+  23.1%  tldr-pages                  CC-BY-4.0
+  18.0%  NL2SH-ALFA training split   MIT
+  11.8%  cli-commands-explained      CC0-1.0    (declared, unverified)
+   7.3%  command-generation          Apache-2.0 (declared, unverified)
+   7.1%  git-instruction             MIT        (declared, unverified)
+
+5.67% is verbatim NL2Bash via the ALFA split; its data/bash is MIT, not GPL.
+Warp workflows are not used.
+
+Attribution, required by CC-BY-4.0: this work includes content from tldr-pages
+(https://github.com/tldr-pages/tldr) under CC-BY-4.0
+(https://creativecommons.org/licenses/by/4.0/). Page content is CC-BY-4.0;
+only scripts/ is MIT.
