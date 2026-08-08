@@ -1,7 +1,7 @@
 # nl2sh
 
-**Ask for a shell command in plain English. Runs entirely on your own machine,
-on CPU — no GPU, no API key, no network.** Answers in about a second.
+Ask for a shell command in plain English. Runs on your own machine, on CPU.
+No GPU, no API key, no network. Answers in about a second.
 
 ```console
 $ nl2sh find files bigger than 100MB in this folder
@@ -15,38 +15,53 @@ $ nl2sh delete everything in the root directory
 rm -rf /
 ```
 
-The model is 941 MB and runs locally through `llama.cpp`. Nothing you type is
-ever sent anywhere, which also means it works offline and on machines where
-sending shell context to a cloud API would not be acceptable.
+The model is 941 MB and runs through `llama.cpp`. Nothing you type leaves the
+machine, so it works offline, and on boxes where piping shell context to a
+cloud API isn't allowed.
 
 ## Install
 
-Everything below runs on CPU. No GPU, no API key, and no network at inference
-time.
+Three pieces: the CLI, the model file, and a `llama.cpp` build to run it.
+
+**1. The CLI.**
 
 ```bash
-# 1. the CLI
 git clone https://github.com/ThorOdinson246/nl2sh
 cd nl2sh && pip install ./nl2sh_pkg
+```
 
-# 2. the model (941 MB)
-pip install huggingface_hub
+**2. The model, 941 MB.**
+
+```bash
+pip install -U huggingface_hub
 hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir .
+```
 
-# 3. a llama.cpp runtime -- prebuilt binaries from
-#    https://github.com/ggml-org/llama.cpp/releases (llama-server, llama-cli)
+If `hf` isn't found, your `huggingface_hub` predates the rename. Either upgrade
+it, or use `huggingface-cli download` with the same arguments.
 
-# 4. wire them together
+**3. A llama.cpp build.** Grab the release archive for your platform from
+[llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) and unzip
+it. You need `llama-server` (and `llama-cli` for the fallback path). If you'd
+rather build from source or already have it via Homebrew, that's fine too, just
+note where `llama-server` ended up.
+
+**4. Point nl2sh at both.**
+
+```bash
 nl2sh setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
 nl2sh doctor
 ```
 
-Python 3.9 or newer, on Linux or macOS. There is no PyPI release yet, so the
-CLI installs from source.
+`--bin-dir` is the directory containing `llama-server`, not the binary itself.
+`doctor` tells you which of the three pieces is missing if something's off.
+
+Python 3.9+, Linux or macOS. No PyPI release yet, so the CLI installs from
+source.
 
 ## Use
 
-Type the request as plain arguments — no quoting needed:
+Type the request as plain arguments. No quoting needed:
 
 ```bash
 nl2sh list files changed in the last week
@@ -59,8 +74,8 @@ nl2sh list files changed in the last week
 | `-q`, `--quiet` | print only the bare command, for `$(...)` substitution |
 | `-t`, `--timing` | report how long generation took |
 
-Commands are never executed unless you pass `-e` and confirm at the prompt,
-and anything flagged `DANGER` is never auto-run at all.
+Nothing runs unless you pass `-e` and confirm at the prompt. Anything flagged
+`DANGER` is never auto-run at all.
 
 ```bash
 # use the result inline
@@ -70,77 +85,123 @@ cd "$(nl2sh -q the directory holding the largest log file)"
 nl2sh -e remove every .pyc file under this tree
 ```
 
-Other subcommands: `nl2sh stop` shuts down the resident model server,
-`nl2sh config --set threads=4` changes settings.
+`nl2sh stop` shuts down the resident model server. `nl2sh config --set threads=4`
+changes settings.
 
 ## How it works
 
-The first call starts a small `llama.cpp` server that stays resident, so
-subsequent calls skip model loading and answer in roughly a second (31.7 tok/s
-measured on a Xeon Gold 6426Y using 3 threads). Generation is greedy —
-temperature 0 — so the same question gives the same command every time.
+First call starts a small `llama.cpp` server and leaves it resident, so later
+calls skip model loading and come back in about a second, around 32 tok/s on 3
+threads. Three threads is the point: it's a 1.5B at Q4_K_M, so it's bound by
+how many cores you give it rather than what machine they're in, and it needs
+under 2 GB of RAM. Decoding is greedy at temperature 0, so the same question
+always gives the same command.
 
-The model is Qwen2.5-Coder-1.5B-Instruct with a LoRA fine-tune trained on
-125,770 natural-language/shell-command pairs, merged and quantized to GGUF
-Q4_K_M. Weights:
-[ThorOdinson246/nl2sh-1.5b-Q4_K_M](https://huggingface.co/ThorOdinson246/nl2sh-1.5b-Q4_K_M).
+## Training setup
 
-## How good is it
+For anyone who wants to reproduce or fork this.
+
+Base is [Qwen2.5-Coder-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct).
+LoRA fine-tune, merged into the base weights in bf16, converted to f16 GGUF,
+then quantized to Q4_K_M.
+
+| | |
+|---|---|
+| LoRA rank / alpha / dropout | 32 / 64 / 0.05 |
+| target modules | all linear (`q,k,v,o,gate,up,down`) |
+| LR / schedule | 2e-4, cosine, 3% warmup |
+| epochs | 2, packing off |
+| batch | 16 x 2 grad accum, seq len 512 |
+| precision | bf16, seed 42 |
+| hardware | one A100 80GB, about an hour |
+| data | 125,770 NL/command pairs |
+
+A few things that surprised me and might save you time:
+
+**Targeting all linear layers mattered more than rank.** The NAACL 2025 NL2SH
+paper fine-tuned this exact base model with r=64 and got *worse* results
+(0.21 to 0.19). I used half their rank but hit the MLP layers too, with
+alpha/r = 2.0 instead of 0.5 and a 20x higher LR. That flipped the outcome.
+
+**Raising rank past 32 did nothing.** I swept r=64, 128 and 256 holding
+everything else fixed. None of them beat r=32 by more than noise (r=128 was
++0.007, McNemar p = 1.0). Biderman et al.'s "code needs r=256" finding did not
+transfer here.
+
+**Don't select checkpoints on eval loss.** Eval loss and benchmark accuracy
+only correlate at about rho 0.4 on this task. The r=64 run had the *best* eval
+loss and nearly the worst accuracy, so `load_best_model_at_end` would have
+shipped the wrong model.
+
+**Output parsing is worth a lot on the untuned model and nothing on the tuned
+one.** Stripping markdown fences and prose is worth about 15 points on base
+Qwen2.5-Coder-1.5B. On the fine-tuned model it's worth zero, because the
+fine-tune already taught it to emit a bare command. Nice side effect: none of
+the gain below is a post-processing artifact.
+
+**Quantization is a cliff, not a slope.** f16 scores 0.637 and Q4_K_M scores
+0.620. Q5_K_M and Q6_K recover none of that 1.7 points, so Q4_K_M is the right
+stop.
+
+There's a 3B version of the same recipe that scores 0.657, mostly by being
+better on the hard tasks (+9 points there vs +0 on easy ones). It's 2.3x
+slower, which is why the 1.5B is the default.
+
+## Benchmarks
 
 Measured on [InterCode-ALFA](https://github.com/westenfelder/InterCode-ALFA),
-the official benchmark for this task. It scores a command by *running* it in a
-container and comparing the resulting filesystem, file contents and stdout
-against a reference. A task passes only on an exact match, across 300 tasks.
+the benchmark from the NAACL 2025 NL2SH paper. It runs each generated command
+in a container and diffs the resulting filesystem and stdout against a
+reference command. 300 tasks, pass or fail per task.
 
 | model | size on disk | pass rate |
 |---|---|---|
-| GPT-4o — cloud API † | — | 0.73 |
+| GPT-4o, cloud API † | | 0.73 |
 | **nl2sh (this tool)** | **941 MB** | **0.620** |
 | Qwen2.5-Coder-7B, untuned | 4.4 GB | 0.613 |
-| Qwen2.5-Coder-1.5B, untuned — the base this is built on | 941 MB | 0.540 |
+| Qwen2.5-Coder-1.5B, untuned (the base) | 941 MB | 0.540 |
 
-**Fine-tuning is what makes a small model usable here.** The same 1.5B base
-goes from 0.540 to 0.620 on the identical 300 tasks (+0.080, p = 0.004, exact
-McNemar on paired outcomes).
+Same base, same 300 tasks, 0.540 to 0.620. That's +0.080 paired, p = 0.004 on
+an exact McNemar test.
 
-**It holds its own against a model five times its size.** 0.620 against 0.613
-for the untuned 7B is a difference of 0.007, 95% CI [−0.050, +0.063],
-p = 0.91 — statistically indistinguishable. That is a bound, not a claim of
-equality: 300 tasks can only rule out gaps larger than about 5 points. But
-shrinking to 941 MB and moving to CPU costs far less than the size gap
-suggests.
+Against the untuned 7B the difference is 0.007, which 300 tasks can't resolve
+(95% CI -0.050 to +0.063). The honest reading is "roughly a 7B", not "beats a
+7B". GPT-4o is about 11 points ahead and it's a cloud service you hand your
+shell context to.
 
-GPT-4o is ahead, by about 11 points. It is also a cloud service you send your
-shell requests to. nl2sh is the local option that gets closest.
+<sub>† GPT-4o's number is the one published by the benchmark authors. Every
+other row I measured myself with the unmodified upstream scorer at temperature
+0, `max_tokens=64`, embedding heuristic at threshold 0.75, icalfa 0.3.6.</sub>
 
-<sub>† The GPT-4o figure is the one published by the benchmark's authors; the
-other rows were measured with the unmodified upstream scorer at temperature 0,
-on all 300 tasks, using paired per-task comparisons.</sub>
+## What it gets wrong
+
+Worth knowing before you trust it:
+
+- **It inverts things.** Ask for "smallest first" and you may get largest
+  first. Ask for "case sensitive" and get `grep -i`. In adversarial testing
+  roughly 1 in 7 commands flipped some aspect of the request. These run
+  cleanly and look right, which is the worst kind of wrong.
+- On ordinary everyday requests, about 1 in 8 outputs is just wrong.
+- It's single-turn. No memory of your last command, no shell state.
+- It can't see your filesystem, so "delete the older backup" is a guess.
+- Output caps at 64 tokens. That's a command, not a script.
+- English only, and measured on one 300-task benchmark, which is not the same
+  thing as being good at shell.
 
 ## Safety
 
-Every command is checked before it is shown. nl2sh flags recursive deletes of
-critical paths, writes to raw block devices, `chmod -R 777 /`, fork bombs,
-curl-piped-to-shell, and the same patterns hidden behind `sudo`, `env`,
-`nohup`, quoting tricks or `..` traversal. Findings are labelled `DANGER`
-(never auto-run) or `CAUTION` (warned, still yours to approve). The checker
-ships with a 150-case regression suite run in CI on Python 3.9 through 3.12.
+Every generated command is checked before it's printed. The checker flags
+recursive deletes of critical paths, writes to raw block devices, chmod and
+chown across system paths, fork bombs, curl piped into a shell, crontab wipes,
+firewall flushes, private key exposure, and the same patterns hidden behind
+`sudo`, `env`, `nohup`, quoting tricks or `..` traversal. Findings come back as
+`DANGER` (never auto-run) or `CAUTION` (warned, still yours to approve). 191
+regression cases run in CI on Python 3.9 through 3.12.
 
-It is a denylist over a Turing-complete language, not a sandbox. It raises the
-cost of the common destructive mistakes; it cannot catch every one. On a
-held-out set of ordinary prompts it flagged one of three genuinely destructive
-outputs. **Read the command before you run it.**
-
-## Limitations
-
-- Single-turn. It does not remember your last command or track shell state.
-- It cannot see your filesystem, so requests that depend on what is actually
-  on disk ("delete the older backup") may guess wrong.
-- Output is capped at 64 tokens, enough for a command and not for a script.
-- Quality is measured on one benchmark of 300 tasks. It is not a complete
-  measure of shell competence, and it is English-only.
-- Trained from one base model family; nothing here shows the recipe carries to
-  others.
+It's a denylist over a Turing-complete language, not a sandbox. Every rule in
+it came from a command this model actually produced during testing, which means
+it covers the mistakes I've seen and not the ones I haven't. Read the command
+before you run it.
 
 ## Development
 
@@ -150,8 +211,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests cover the CLI, the extraction parser, the engine and the safety checker,
-and run in CI on Python 3.9 through 3.12.
+Tests cover the CLI, the extraction parser, the engine and the safety checker.
 
 ## Licence
 
@@ -169,12 +229,12 @@ Training data, by measured row share of the 125,770-row pool:
 | command-generation | 7.3% | Apache-2.0 *(declared, unverified)* |
 | git-instruction | 7.1% | MIT *(declared, unverified)* |
 
-5.67% is verbatim NL2Bash arriving via the ALFA split — its `data/bash` is MIT,
-not GPL. Warp workflows are not used. The three *declared* sources have licences
-we could not independently confirm. Deduplicated, and 0 exact/fuzzy matches
-against the benchmark test set.
+5.67% is verbatim NL2Bash arriving via the ALFA split. Its `data/bash` is MIT,
+not GPL. Warp workflows are not used. The three *declared* sources have
+licences I couldn't independently confirm. Deduplicated, with 0 exact and 0
+fuzzy matches against the benchmark test set.
 
 **Attribution:** includes content from
 [tldr-pages](https://github.com/tldr-pages/tldr) under
 [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) (page content is
-CC-BY-4.0; only `scripts/` is MIT).
+CC-BY-4.0, only `scripts/` is MIT).
