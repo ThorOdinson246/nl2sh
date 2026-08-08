@@ -1,0 +1,21 @@
+nl2sh
+Copyright 2026 Mukesh Poudel
+
+This product includes software developed by Mukesh Poudel
+(https://github.com/ThorOdinson246/nl2sh).
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy of
+the License at http://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+The accompanying model weights (nl2sh-1.5b-Q4_K_M) are a LoRA fine-tune of
+Qwen2.5-Coder-1.5B-Instruct, Copyright Alibaba Cloud, used under the Apache
+License, Version 2.0.
+
+Training data is assembled from:
+  - tldr-pages                      CC-BY 4.0
+  - NL2Bash                         GPLv3
+  - Fig autocomplete specs          MIT
+  - Warp workflows                  Apache-2.0
+  - NL2SH-ALFA training split       MIT
