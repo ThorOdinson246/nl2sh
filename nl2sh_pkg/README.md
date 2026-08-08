@@ -3,8 +3,8 @@
 Natural language to shell command. Fully local, no API key, no network call.
 
 ```console
-$ nl2sh look at current queued tasks in slurm
-squeue -u $USER
+$ nl2sh show which processes are using the most memory
+ps aux --sort=-%mem | head -n 11
 
 $ nl2sh find files bigger than 100MB in this folder
 find . -size +100M -exec ls -lh {} \;
