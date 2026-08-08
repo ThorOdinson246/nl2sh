@@ -51,10 +51,9 @@ CRITICAL_TARGETS = {
     "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
     "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/usr", "/var",
     "~", "$HOME", "${HOME}",
-    # Second-level system state that the top-level entries do NOT cover, because
-    # a target must BE a listed path rather than sit under one. `/var` being
-    # critical never made `/var/log` critical, so "erase all system logs"
-    # produced an unflagged recursive delete of every log on the machine.
+    # Second-level system state the top-level entries do NOT cover: a target
+    # must BE a listed path rather than sit under one, so `/var` being critical
+    # never made `/var/log` critical.
     "/var/log", "/var/lib", "/var/spool", "/usr/local", "/usr/bin", "/usr/lib",
     "/etc/ssh", "/etc/systemd",
 }
@@ -305,7 +304,42 @@ WHOLE_DANGER = [
     (re.compile(r"\bcrontab\b(?:\s+-\w+)*\s+-\w*r"),
      "crontab -r deletes the whole crontab, unprompted"),
     # Removes the account's home directory and mail spool along with the user.
-    (re.compile(r"\buserdel\b[^|;]*\s-\w*r"), "userdel -r deletes the user's home directory"),
+    # `deluser` is Debian's front-end for the same operation. Synonyms are
+    # listed explicitly: matching one spelling of a tool is not coverage of it.
+    (re.compile(r"\b(?:userdel|deluser)\b[^|;]*\s--?(?:r\b|remove-home|remove-all-files)"),
+     "deletes the user account together with its home directory and files"),
+    # Flushing every chain drops the rules that were permitting your own SSH
+    # session. On a remote host with a default DROP policy this is a permanent
+    # lockout needing console access to undo, so it is worth refusing to
+    # auto-run even though a local reset is legitimate.
+    (re.compile(r"\biptables\b[^|;]*\s-[FX]\b|\bnft\s+flush\s+ruleset\b"),
+     "flushes firewall rules -- can lock you out of a remote machine"),
+    # A truncating redirect (`>`, not `>>`) or a tee without -a over
+    # authorized_keys removes the key you are currently logged in with.
+    # ~/.ssh/authorized_keys never resolves through CRITICAL_FILES because it
+    # is under `~`, so no path check reached it.
+    (re.compile(r"(?<!>)>\s*[^\s|;>]*authorized_keys"
+                r"|\btee\b(?!\s+-\w*a)[^|;]*authorized_keys"),
+     "overwrites authorized_keys -- can lock you out of ssh"),
+    # Anything group- or world-readable on a private key exposes it, and ssh
+    # then refuses the key anyway. Matches a mode whose GROUP or OTHER digit is
+    # >= 4, so the correct `chmod 600 ~/.ssh/id_rsa` stays silent.
+    (re.compile(r"\bchmod\b[^|;]*\s(?:0?[0-7][4-7][0-7]|0?[0-7][0-7][4-7]|[ugoa]*\+r)\s"
+                r"[^|;]*(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|private[_-]?key|\.pem)\b"),
+     "makes a private key readable by others -- exposes it, and ssh will reject it"),
+    # Removing the package manager or libc leaves a machine that cannot install
+    # its way back out. The trailing lookahead keeps `apt remove libc6-dev`
+    # (an ordinary build-dep cleanup) from matching `libc6`.
+    (re.compile(r"\b(?:apt|apt-get|aptitude|dpkg|yum|dnf|rpm)\b[^|;]*"
+                r"\b(?:remove|purge|erase|autoremove)\b[^|;]*"
+                r"(?<![\w-])(?:dpkg|apt|apt-get|coreutils|bash|libc6|glibc|systemd|"
+                r"util-linux|sudo|linux-image)(?![\w-])"),
+     "removes an essential package -- the system cannot recover on its own"),
+    # Expiring the reflog and pruning is the one git operation with no undo:
+    # it discards the recovery path that makes reset/rebase survivable.
+    (re.compile(r"\bgit\s+reflog\s+expire\b[^|;]*--expire(?:=|\s+)(?:now|all)"
+                r"|\bgit\s+gc\b[^|;]*--prune(?:=|\s+)now"),
+     "expires the reflog -- removes git's last-resort recovery path"),
 ]
 
 WHOLE_CAUTION = [
@@ -507,8 +541,7 @@ def check(command: str) -> list[tuple[str, str]]:
                 # not a critical path so cwd_is_critical stayed False, and
                 # cd_seen being True disabled the unscoped-CWD rule below. The
                 # directory two levels above an unknown CWD is exactly as
-                # unknowable as the CWD itself, and the request that produced
-                # this was literally "the parent of the parent".
+                # unknowable as the CWD itself.
                 findings.append(("DANGER",
                     f"{verb}: glob delete in a directory reached by 'cd ..' -- the target is "
                     f"a parent of where you started, which this cannot resolve"))
@@ -545,12 +578,10 @@ def check(command: str) -> list[tuple[str, str]]:
             # passed clean because only `-exec` was in the pattern.
             deletes = bool(re.search(
                 r"-delete\b|-(?:exec|ok)\w*\s+(sudo\s+)?(rm|shred|truncate)\b", seg))
-            # `-exec chmod/chown/chgrp` over a critical root is not a delete, so
-            # the branch below never looked at it -- and "make every file on the
-            # system world writable" produced `find / -type f -exec chmod 666 {}
-            # \;` with no finding at all. Re-permissioning every file under / is
-            # not recoverable by re-running anything, so it ranks with the
-            # deletes rather than with the CAUTIONs.
+            # `-exec chmod/chown/chgrp` over a critical root is not a delete,
+            # so the delete branch never inspected it. Re-permissioning every
+            # file under / is not undone by re-running anything, so it ranks
+            # with the deletes rather than with the CAUTIONs.
             repermissions = bool(re.search(
                 r"-(?:exec|ok)\w*\s+(sudo\s+)?(chmod|chown|chgrp)\b", seg))
             if deletes or repermissions:
@@ -561,10 +592,20 @@ def check(command: str) -> list[tuple[str, str]]:
                         break          # predicates start; the search root is done
                     roots.append(a)
                 hit = False
+                # A narrowing predicate is the difference between "erase all
+                # system logs" and the ordinary `find /var/log -mtime +7
+                # -delete` log rotation. Both root at a critical path, so
+                # without this the routine one is DANGER and never auto-runs --
+                # exactly the noise this module exists to avoid. `/` itself is
+                # never downgraded: no filter makes `find / -delete` routine.
+                narrowed = bool(re.search(
+                    r"-i?(?:name|path|regex)\b|-(?:mtime|mmin|atime|amin|ctime|cmin|size|newer)\b",
+                    seg))
                 for a in roots:
                     crit, why = _is_critical(a)
                     if crit:
-                        findings.append(("DANGER", f"{verb_label}: {why}"))
+                        sev = ("CAUTION" if narrowed and _norm_path(a) != "/" else "DANGER")
+                        findings.append((sev, f"{verb_label}: {why}"))
                         hit = True
                         break
                 if not hit and not cd_seen and deletes:
@@ -597,11 +638,19 @@ def check(command: str) -> list[tuple[str, str]]:
             # `chmod 000 /` was caught before. The target is now checked with or
             # without -R, and -R is reported when present.
             positional = [a for a in args if not a.startswith("-")]
+            recursive = "r" in flags or "R" in flags
             for a in positional[1:]:
                 crit, why = _is_critical(a)
+                # Without -R, chmod touches exactly one path, so an unresolved
+                # variable is not the `rm -rf $EMPTY/` hazard that rule exists
+                # for: an empty expansion just makes chmod error out. Keeping it
+                # flagged made `chmod 600 $FILE`, an everyday scripting idiom,
+                # read as DANGER. With -R the variable can still expand to a
+                # tree root, so it stays.
+                if crit and not recursive and "unexpanded variable" in why:
+                    continue
                 if crit:
-                    rec = " -R" if ("r" in flags or "R" in flags) else ""
-                    findings.append(("DANGER", f"{verb}{rec}: {why}"))
+                    findings.append(("DANGER", f"{verb}{' -R' if recursive else ''}: {why}"))
                     break
         elif verb == "ln":
             # `ln -f` overwrites (does not merge with) an existing destination.
