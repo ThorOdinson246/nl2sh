@@ -3,8 +3,8 @@
 Natural language to shell command. Fully local, no API key, no network call.
 
 ```console
-$ nl2sh look at current queued tasks in slurm
-squeue -u $USER
+$ nl2sh show which processes are using the most memory
+ps aux --sort=-%mem | head -n 11
 
 $ nl2sh find files bigger than 100MB in this folder
 find . -size +100M -exec ls -lh {} \;
@@ -17,13 +17,22 @@ rm -rf /
 ## Install
 
 ```bash
-pip install nl2sh
-nl2sh setup --model /path/to/nl2sh-1.5b-Q4_K_M.gguf
+# not on PyPI yet -- install from source
+git clone https://github.com/ThorOdinson246/nl2sh
+cd nl2sh && pip install ./nl2sh_pkg
+
+# the model (941 MB)
+hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir .
+
+# a llama.cpp runtime: prebuilt binaries from
+# https://github.com/ggml-org/llama.cpp/releases
+
+nl2sh setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
+nl2sh doctor
 ```
 
-> **Not yet on PyPI, and `setup` does not download the model yet.** Point it at
-> a GGUF you already have; a released build would fetch it from a model hub.
-> `nl2sh doctor` tells you exactly what is missing.
+`setup` does not fetch anything itself yet; point it at the files above.
+`nl2sh doctor` reports exactly what is missing.
 
 ## Use
 
@@ -85,14 +94,19 @@ in your environment.
 ## Model
 
 A 1.5B-parameter model fine-tuned for this one job and quantised to Q4_K_M
-(~940 MB). On a benchmark of 294 real shell tasks scored by *executing* the
-commands and comparing filesystem and stdout effects, it matches a 4B general
-model at 2.55× smaller and 2.56× faster — and it is the only one of the two
-that answers inside the 1–2 s budget this tool is built around.
+(941 MB): [ThorOdinson246/nl2sh-1.5b-Q4_K_M](https://huggingface.co/ThorOdinson246/nl2sh-1.5b-Q4_K_M).
 
-It is not as good as a frontier model, and it is weakest on multi-stage
-pipelines. It is meant for the one-liner you'd otherwise go and look up.
+On [InterCode-ALFA](https://github.com/westenfelder/InterCode-ALFA) — 300 tasks
+scored by *executing* each command in a container and comparing filesystem
+state, file contents and stdout against a reference — it scores **0.620**,
+against 0.540 for the untuned base it was fine-tuned from (+0.080, p = 0.004).
+That puts it level with an untuned Qwen2.5-Coder-7B at 0.613: a difference of
+0.007, p = 0.91, statistically indistinguishable at roughly a fifth the size.
 
-## License
+It is not as good as a frontier model — GPT-4o is about 11 points ahead on the
+same benchmark — and it is weakest on multi-stage pipelines. It is meant for
+the one-liner you'd otherwise go and look up.
 
-Apache-2.0.
+## Licence
+
+Apache-2.0, as is the Qwen2.5-Coder base model it derives from.

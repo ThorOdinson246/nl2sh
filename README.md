@@ -155,10 +155,8 @@ and run in CI on Python 3.9 through 3.12.
 
 ## Licence
 
-Apache 2.0 for this code — free to use, modify and redistribute, provided the
-licence and `NOTICE` are kept and significant changes are stated. The model
-derives from Qwen2.5-Coder-1.5B-Instruct, also under the Apache 2.0 licence.
-Training data is assembled from tldr-pages (CC-BY 4.0),
+Apache-2.0 for this code. The model derives from Qwen2.5-Coder-1.5B-Instruct,
+also Apache-2.0. Training data is assembled from tldr-pages (CC-BY 4.0),
 NL2Bash (GPLv3), Fig autocomplete specs (MIT), Warp workflows (Apache 2.0) and
 the NL2SH-ALFA published training split (MIT), deduplicated and audited for
 contamination against the benchmark test set.

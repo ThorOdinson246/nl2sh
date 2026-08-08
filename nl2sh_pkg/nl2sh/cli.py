@@ -1,7 +1,7 @@
 """nl2sh -- natural language to shell command, fully local.
 
 Usage:
-    nl2sh look at current queued tasks in slurm
+    nl2sh find files larger than 100MB in this folder
     nl2sh "find files over 100MB modified this week"
     nl2sh -n 3 compress this folder      # show alternatives
     nl2sh -e count lines in every python file   # run it, after confirming
@@ -210,8 +210,8 @@ def cmd_setup(args, cfg: dict) -> int:
         if not src.exists():
             print(f"  {RED('no such file')}: {src}", file=sys.stderr)
             return 1
-        # Symlink rather than copy: the model is ~1 GB and on this cluster it
-        # lives on shared storage already.
+        # Symlink rather than copy by default: the model is ~1 GB and is
+        # often already on shared or external storage. --copy overrides.
         if args.copy:
             print(f"  copying {src} -> {target} (~1 GB, please wait)")
             shutil.copy2(src, target)
@@ -238,7 +238,7 @@ def cmd_setup(args, cfg: dict) -> int:
     print(f"  config written: {p}")
     print(f"  threads: {cfg_mod.resolve_threads(cfg)} "
           + DIM(f"(of {os.cpu_count()} cores; decode is memory-bound, not core-bound)"))
-    print(f"\n{GREEN('Ready.')} Try:  nl2sh look at current queued tasks in slurm")
+    print(f"\n{GREEN('Ready.')} Try:  nl2sh list files changed this week")
     return 0
 
 
@@ -308,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="nl2sh", description="Natural language to shell command, fully local. No network.",
         epilog="examples:\n"
-               "  nl2sh look at current queued tasks in slurm\n"
+               "  nl2sh find files larger than 100MB in this folder\n"
                "  nl2sh -n 3 'find files bigger than 100MB'\n"
                "  nl2sh -e 'count lines in every python file'\n"
                "  eval \"$(nl2sh -q 'show disk usage')\"",
@@ -350,8 +350,8 @@ class QueryArgs:
     argparse cannot be used for the query path. Two reasons, both found by
     actually typing realistic requests:
       1. A subparser turns any trailing word that happens to name a
-         subcommand into one -- `nl2sh look at queued tasks in slurm` died
-         with "invalid choice: 'slurm'".
+         subcommand into one -- `nl2sh how do I stop a stuck process` is
+         parsed as the `stop` subcommand.
       2. Real requests contain things that look like flags
          (`find files -name test`), which argparse would reject.
     So: consume flags only while they appear BEFORE the request text, then
