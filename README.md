@@ -91,11 +91,20 @@ changes settings.
 ## How it works
 
 First call starts a small `llama.cpp` server and leaves it resident, so later
-calls skip model loading and come back in about a second, around 32 tok/s on 3
-threads. Three threads is the point: it's a 1.5B at Q4_K_M, so it's bound by
-how many cores you give it rather than what machine they're in, and it needs
-under 2 GB of RAM. Decoding is greedy at temperature 0, so the same question
-always gives the same command.
+calls skip model loading.
+
+Numbers from a laptop, an Intel i5-11320H with 4 cores, using 4 threads:
+
+| | |
+|---|---|
+| generation | 31.9 tok/s |
+| answer latency, warm | 0.59s median over 12 queries |
+| cold start | 2.1s |
+| resident memory | 1.6 GB |
+
+Nothing here needs a GPU or a big machine. It's a 1.5B at Q4_K_M, so what
+matters is how many threads you give it, not what they're in. Decoding is
+greedy at temperature 0, so the same question always gives the same command.
 
 ## Training setup
 
