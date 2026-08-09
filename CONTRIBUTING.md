@@ -44,9 +44,9 @@ repo-wide (e.g. a `.gitignore` chore, a root README update).
 
 | scope | covers |
 |---|---|
-| `cli` | `nl2sh_pkg/nl2sh/cli.py`, `__main__.py`, argument parsing, user-facing output |
-| `safety` | `nl2sh_pkg/nl2sh/safety.py` and its test suite |
-| `engine` | `nl2sh_pkg/nl2sh/engine.py`, `hostctx.py`, `extract.py`, `config.py` — the model-serving/inference path |
+| `cli` | `whatisit_pkg/whatisit/cli.py`, `__main__.py`, argument parsing, user-facing output |
+| `safety` | `whatisit_pkg/whatisit/safety.py` and its test suite |
+| `engine` | `whatisit_pkg/whatisit/engine.py`, `hostctx.py`, `extract.py`, `config.py` — the model-serving/inference path |
 | `eval` | `scripts/eval/`, benchmark harness, scoring |
 | `data` | `scripts/data/`, dataset assembly and cleaning |
 | `train` | `scripts/train/`, `scripts/distill/` — training and distillation |
@@ -109,7 +109,7 @@ fix(safety): close 18 bypasses found by third adversarial audit
 Includes wrapper-verb bypasses (/bin/rm, sudo, env, nice, nohup),
 shell-string indirection (bash -c "rm -rf /"), .. traversal, and
 critical-file targets for shred/unlink. Regression suite:
-nl2sh_pkg/tests/test_safety.py, 95/95 at the time of this commit.
+whatisit_pkg/tests/test_safety.py, 95/95 at the time of this commit.
 ```
 
 ## Using the commit template

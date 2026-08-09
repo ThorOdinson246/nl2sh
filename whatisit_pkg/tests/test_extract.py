@@ -1,4 +1,4 @@
-"""Tests for nl2sh.extract.extract().
+"""Tests for whatisit.extract.extract().
 
 extract() turns raw model output into one runnable command line. Getting this
 wrong is a real security concern, not a cosmetic one: escape sequences in
@@ -7,7 +7,7 @@ repaint the command a user is about to approve (see extract.py's module
 docstring), so the control-byte-stripping path is exercised explicitly below
 alongside the ordinary parsing cases (fences, prompts, preambles, <think>).
 """
-from nl2sh.extract import extract
+from whatisit.extract import extract
 
 
 class TestMarkdownFences:

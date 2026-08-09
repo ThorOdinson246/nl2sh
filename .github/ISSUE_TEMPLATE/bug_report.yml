@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in nl2sh is broken or behaving unexpectedly
+description: Something in whatisit is broken or behaving unexpectedly
 labels: ["bug"]
 body:
   - type: textarea
@@ -12,17 +12,17 @@ body:
   - type: input
     id: command
     attributes:
-      label: Exact nl2sh invocation
-      placeholder: nl2sh -n 3 "find files bigger than 100MB"
+      label: Exact whatisit invocation
+      placeholder: whatisit -n 3 "find files bigger than 100MB"
   - type: textarea
     id: doctor
     attributes:
-      label: Output of `nl2sh doctor`
+      label: Output of `whatisit doctor`
       render: shell
   - type: input
     id: version
     attributes:
-      label: nl2sh version / commit
+      label: whatisit version / commit
       placeholder: 0.1.0
   - type: input
     id: platform

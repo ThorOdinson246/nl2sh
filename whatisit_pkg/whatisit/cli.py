@@ -1,10 +1,10 @@
-"""nl2sh -- natural language to shell command, fully local.
+"""whatisit -- natural language to shell command, fully local.
 
 Usage:
-    nl2sh find files larger than 100MB in this folder
-    nl2sh "find files over 100MB modified this week"
-    nl2sh -n 3 compress this folder      # show alternatives
-    nl2sh -e count lines in every python file   # run it, after confirming
+    whatisit find files larger than 100MB in this folder
+    whatisit "find files over 100MB modified this week"
+    whatisit -n 3 compress this folder      # show alternatives
+    whatisit -e count lines in every python file   # run it, after confirming
 
 Subcommands: setup, doctor, stop, config
 """
@@ -65,11 +65,10 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
-        # Create at 0600 from the open() call itself rather than writing then
-        # chmod-ing after: the latter left the FIRST line -- a real shell
-        # request, which can contain hostnames, paths and secrets -- exposed
-        # at the umask-derived default mode (group-readable on a shared NFS
-        # home) for the whole window between the write and the chmod call.
+        # Create at 0600 from open() rather than chmod-ing after: write-then-
+        # chmod leaves the first line -- a real shell request, which can carry
+        # hostnames, paths and secrets -- readable at the umask default
+        # (group-readable on a shared NFS home) for the width of that window.
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         try:
             os.fchmod(fd, 0o600)   # also covers a pre-existing, wrongly-permissioned file
@@ -84,33 +83,31 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
 def cmd_query(args, cfg: dict) -> int:
     prompt = " ".join(args.words).strip()
     if not prompt:
-        print("nl2sh: nothing to do -- give me a request in plain English", file=sys.stderr)
+        print("whatisit: nothing to do -- give me a request in plain English", file=sys.stderr)
         return 2
 
     try:
         cmds, elapsed, mode = engine.generate(
             prompt, cfg, n=args.num, force_oneshot=args.oneshot, quiet=args.quiet)
     except FileNotFoundError as e:
-        print(f"nl2sh: {e}", file=sys.stderr)
+        print(f"whatisit: {e}", file=sys.stderr)
         return 3
     except Exception as e:
-        print(f"nl2sh: generation failed: {e}", file=sys.stderr)
+        print(f"whatisit: generation failed: {e}", file=sys.stderr)
         return 4
 
     if not cmds:
-        print("nl2sh: the model returned nothing usable. Try rephrasing.", file=sys.stderr)
+        print("whatisit: the model returned nothing usable. Try rephrasing.", file=sys.stderr)
         return 5
 
-    # --quiet keeps STDOUT bare so it composes: x=$(nl2sh -q ...).
-    # But it must still run the safety check. The README advertises
-    # eval "$(nl2sh -q ...)" as the scripting idiom, and an earlier version
-    # returned here BEFORE check() was ever called -- so the one documented
-    # path that pipes straight into a shell was the one path with no checking
-    # at all. Warnings go to stderr, leaving stdout clean.
+    # --quiet keeps STDOUT bare so it composes: x=$(whatisit -q ...).
+    # It must still run the safety check: eval "$(whatisit -q ...)" is the
+    # documented scripting idiom, so this is the one path that pipes straight
+    # into a shell. Warnings go to stderr, leaving stdout clean.
     if args.quiet:
         findings = check(cmds[0])
         if any(sev == "DANGER" for sev, _ in findings):
-            print("nl2sh: refusing to emit a command flagged DANGER:", file=sys.stderr)
+            print("whatisit: refusing to emit a command flagged DANGER:", file=sys.stderr)
             print_findings(findings)
             return 6
         print(cmds[0])
@@ -124,7 +121,7 @@ def cmd_query(args, cfg: dict) -> int:
         findings = check(c)
         if findings:
             # The command goes to stdout and warnings to stderr (so that
-            # `nl2sh ... | sh` still works). Without this flush the two streams
+            # `whatisit ... | sh` still works). Without this flush the two streams
             # interleave and the warning appears ABOVE the command it is about.
             sys.stdout.flush()
             print_findings(findings)
@@ -134,7 +131,7 @@ def cmd_query(args, cfg: dict) -> int:
     # never printed after messages that refer to it.
     sys.stdout.flush()
 
-    # Opt-in only (`nl2sh config --set log_queries=true`). Shell requests can
+    # Opt-in only (`whatisit config --set log_queries=true`). Shell requests can
     # contain hostnames, paths and credentials, so this is never on by default
     # and stays on the local disk.
     if cfg.get("log_queries"):
@@ -152,7 +149,7 @@ def cmd_query(args, cfg: dict) -> int:
     # picking silently would run something the user never chose.
     if len(cmds) > 1:
         if not sys.stdin.isatty():
-            print("nl2sh: several candidates -- rerun without -n, or pick one yourself.",
+            print("whatisit: several candidates -- rerun without -n, or pick one yourself.",
                   file=sys.stderr)
             return 6
         try:
@@ -161,7 +158,7 @@ def cmd_query(args, cfg: dict) -> int:
             print()
             return 130
         if not pick.isdigit() or not 1 <= int(pick) <= len(cmds):
-            print("nl2sh: not running.", file=sys.stderr)
+            print("whatisit: not running.", file=sys.stderr)
             return 0
         chosen = cmds[int(pick) - 1]
     else:
@@ -177,7 +174,7 @@ def cmd_query(args, cfg: dict) -> int:
 
     if cfg.get("confirm_execute", True):
         if not sys.stdin.isatty():
-            print("nl2sh: refusing to execute without an interactive confirmation.",
+            print("whatisit: refusing to execute without an interactive confirmation.",
                   file=sys.stderr)
             return 6
         try:
@@ -186,7 +183,7 @@ def cmd_query(args, cfg: dict) -> int:
             print()
             return 130
         if ans not in ("y", "yes"):
-            print("nl2sh: not running.", file=sys.stderr)
+            print("whatisit: not running.", file=sys.stderr)
             return 0
 
     print(DIM(f"$ {chosen}"), file=sys.stderr)
@@ -195,17 +192,16 @@ def cmd_query(args, cfg: dict) -> int:
 
 
 def cmd_setup(args, cfg: dict) -> int:
-    print(BOLD("nl2sh setup"))
+    print(BOLD("whatisit setup"))
     models_dir = cfg_mod.data_dir() / "models"
     bin_dir = cfg_mod.data_dir() / "bin"
     models_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     target = models_dir / cfg_mod.MODEL_NAME
-    # An explicit --model always wins. Without this, re-running setup to switch
-    # models silently kept the old one: the target name is fixed, so the
-    # existence check matched the previously registered file and the new path
-    # was ignored while setup still reported success.
+    # An explicit --model always wins. The target name is fixed, so without
+    # this the existence check below matches the already-registered file and
+    # switching models is a silent no-op that still reports success.
     if args.model and target.exists():
         src = Path(args.model).expanduser().resolve()
         if src.exists() and (not target.is_symlink() or
@@ -231,13 +227,13 @@ def cmd_setup(args, cfg: dict) -> int:
             print(f"  linked model: {target} -> {src}")
     else:
         print(f"  {YELLOW('no model yet.')} Provide one with:")
-        print(f"    nl2sh setup --model /path/to/{cfg_mod.MODEL_NAME}")
+        print(f"    whatisit setup --model /path/to/{cfg_mod.MODEL_NAME}")
         print(DIM("  (a released build would download it from the model hub here)"))
 
-    for name, envvar in (("llama-server", "NL2SH_LLAMA_SERVER"),
-                         ("llama-cli", "NL2SH_LLAMA_CLI")):
+    for name, suffix in (("llama-server", "LLAMA_SERVER"),
+                         ("llama-cli", "LLAMA_CLI")):
         dest = bin_dir / name
-        src = os.environ.get(envvar) or (args.bin_dir and str(Path(args.bin_dir) / name))
+        src = cfg_mod.env(suffix) or (args.bin_dir and str(Path(args.bin_dir) / name))
         if dest.exists():
             print(f"  runtime present: {dest}")
         elif src and Path(src).exists():
@@ -249,12 +245,12 @@ def cmd_setup(args, cfg: dict) -> int:
     print(f"  config written: {p}")
     print(f"  threads: {cfg_mod.resolve_threads(cfg)} "
           + DIM(f"(of {os.cpu_count()} cores; decode is memory-bound, not core-bound)"))
-    print(f"\n{GREEN('Ready.')} Try:  nl2sh list files changed this week")
+    print(f"\n{GREEN('Ready.')} Try:  whatisit list files changed this week")
     return 0
 
 
 def cmd_doctor(args, cfg: dict) -> int:
-    print(BOLD("nl2sh doctor"))
+    print(BOLD("whatisit doctor"))
     ok = True
 
     model = cfg_mod.find_model()
@@ -267,10 +263,10 @@ def cmd_doctor(args, cfg: dict) -> int:
         print(f"  {GREEN('ok')}    model      {model} "
               f"({model.stat().st_size / 1e6:.0f} MB){suffix}")
     else:
-        print(f"  {RED('FAIL')}  model      not found -- run `nl2sh setup --model ...`")
+        print(f"  {RED('FAIL')}  model      not found -- run `whatisit setup --model ...`")
         ok = False
 
-    srv = os.environ.get("NL2SH_LLAMA_SERVER") or str(cfg_mod.data_dir() / "bin" / "llama-server")
+    srv = cfg_mod.env("LLAMA_SERVER") or str(cfg_mod.data_dir() / "bin" / "llama-server")
     if Path(srv).exists():
         print(f"  {GREEN('ok')}    server     {srv}")
     else:
@@ -289,12 +285,22 @@ def cmd_doctor(args, cfg: dict) -> int:
     print(f"  {'ok' if port else 'idle'}  server pid {where}")
     print(f"  info  threads    {cfg_mod.resolve_threads(cfg)} (of {os.cpu_count()} cores)")
     print(f"  info  config     {cfg_mod.config_path()}")
+
+    # Both directories present means the one-time move was skipped rather than
+    # run: it never overwrites. Only worth saying here, where someone is
+    # already asking why the install looks wrong.
+    for kind in ("config", "data"):
+        legacy = cfg_mod.legacy_dir(kind)
+        current = cfg_mod.config_dir() if kind == "config" else cfg_mod.data_dir()
+        if legacy.is_dir() and current.is_dir():
+            print(f"  {YELLOW('warn')}  {kind:<10} {legacy} also exists and is unused; "
+                  f"{current} is the live one")
     print(f"\n{GREEN('All good.') if ok else RED('Not ready.')}")
     return 0 if ok else 1
 
 
 def cmd_stop(args, cfg: dict) -> int:
-    print("nl2sh: server stopped." if engine.stop_server() else "nl2sh: no server running.")
+    print("whatisit: server stopped." if engine.stop_server() else "whatisit: no server running.")
     return 0
 
 
@@ -302,7 +308,7 @@ def cmd_config(args, cfg: dict) -> int:
     if args.set:
         for kv in args.set:
             if "=" not in kv:
-                print(f"nl2sh: expected key=value, got {kv!r}", file=sys.stderr)
+                print(f"whatisit: expected key=value, got {kv!r}", file=sys.stderr)
                 return 2
             k, v = kv.split("=", 1)
             if v.lower() in ("true", "false"):
@@ -315,7 +321,7 @@ def cmd_config(args, cfg: dict) -> int:
                         cfg[k] = float(v)
                     except ValueError:
                         cfg[k] = v
-        print(f"nl2sh: wrote {cfg_mod.save_config(cfg)}")
+        print(f"whatisit: wrote {cfg_mod.save_config(cfg)}")
     for k in sorted(cfg):
         print(f"  {k} = {cfg[k]}")
     return 0
@@ -323,12 +329,12 @@ def cmd_config(args, cfg: dict) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="nl2sh", description="Natural language to shell command, fully local. No network.",
+        prog="whatisit", description="Natural language to shell command, fully local. No network.",
         epilog="examples:\n"
-               "  nl2sh find files larger than 100MB in this folder\n"
-               "  nl2sh -n 3 'find files bigger than 100MB'\n"
-               "  nl2sh -e 'count lines in every python file'\n"
-               "  eval \"$(nl2sh -q 'show disk usage')\"",
+               "  whatisit find files larger than 100MB in this folder\n"
+               "  whatisit -n 3 'find files bigger than 100MB'\n"
+               "  whatisit -e 'count lines in every python file'\n"
+               "  eval \"$(whatisit -q 'show disk usage')\"",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("words", nargs="*", help="your request, in plain English")
     ap.add_argument("-n", "--num", type=int, default=1, metavar="N",
@@ -367,7 +373,7 @@ class QueryArgs:
     argparse cannot be used for the query path. Two reasons, both found by
     actually typing realistic requests:
       1. A subparser turns any trailing word that happens to name a
-         subcommand into one -- `nl2sh how do I stop a stuck process` is
+         subcommand into one -- `whatisit how do I stop a stuck process` is
          parsed as the `stop` subcommand.
       2. Real requests contain things that look like flags
          (`find files -name test`), which argparse would reject.
@@ -404,6 +410,9 @@ class QueryArgs:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Before load_config, so an existing config.json is read from its new home.
+    # Goes to stderr to keep `$(whatisit -q ...)` substitutions clean.
+    cfg_mod.migrate_legacy_dirs(echo=lambda m: print(m, file=sys.stderr))
     cfg = cfg_mod.load_config()
 
     if not argv:
@@ -411,7 +420,7 @@ def main(argv=None) -> int:
         return 0
 
     # A subcommand only counts as one when it is the very first token, so
-    # `nl2sh config` manages settings while `nl2sh show me the git config`
+    # `whatisit config` manages settings while `whatisit show me the git config`
     # stays a question.
     if argv[0] in SUBCOMMANDS:
         args = build_parser().parse_args(argv)
@@ -424,7 +433,7 @@ def main(argv=None) -> int:
     try:
         args = QueryArgs(argv)
     except ValueError as e:
-        print(f"nl2sh: {e}", file=sys.stderr)
+        print(f"whatisit: {e}", file=sys.stderr)
         return 2
     if not args.words:
         build_parser().print_help()

@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an improvement or a new capability for nl2sh
+description: Suggest an improvement or a new capability for whatisit
 labels: ["enhancement"]
 body:
   - type: textarea

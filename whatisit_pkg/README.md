@@ -1,15 +1,15 @@
-# nl2sh
+# whatisit
 
 Natural language to shell command. Fully local, no API key, no network call.
 
 ```console
-$ nl2sh show which processes are using the most memory
+$ whatisit show which processes are using the most memory
 ps aux --sort=-%mem | head -n 11
 
-$ nl2sh find files bigger than 100MB in this folder
+$ whatisit find files bigger than 100MB in this folder
 find . -size +100M -exec ls -lh {} \;
 
-$ nl2sh delete everything in the root directory
+$ whatisit delete everything in the root directory
   !! DANGER  recursive force-delete of a critical path
 rm -rf /
 ```
@@ -19,7 +19,7 @@ rm -rf /
 ```bash
 # not on PyPI yet -- install from source
 git clone https://github.com/ThorOdinson246/nl2sh
-cd nl2sh && pip install ./nl2sh_pkg
+cd nl2sh && pip install ./whatisit_pkg
 
 # the model (941 MB)
 hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir .
@@ -27,34 +27,34 @@ hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir 
 # a llama.cpp runtime: prebuilt binaries from
 # https://github.com/ggml-org/llama.cpp/releases
 
-nl2sh setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
-nl2sh doctor
+whatisit setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
+whatisit doctor
 ```
 
 `setup` does not fetch anything itself yet; point it at the files above.
-`nl2sh doctor` reports exactly what is missing.
+`whatisit doctor` reports exactly what is missing.
 
 ## Use
 
 ```bash
-nl2sh <your request>              # unquoted is fine
-nl2sh -n 3 compress this folder   # show 3 alternatives
-nl2sh -e count lines in every py file   # run it, after confirming
-eval "$(nl2sh -q show disk usage)"      # bare output, for scripting
+whatisit <your request>              # unquoted is fine
+whatisit -n 3 compress this folder   # show 3 alternatives
+whatisit -e count lines in every py file   # run it, after confirming
+eval "$(whatisit -q show disk usage)"      # bare output, for scripting
 ```
 
 | command | what it does |
 |---|---|
-| `nl2sh setup --model <gguf>` | register a local model file |
-| `nl2sh doctor` | check the install and report what's missing |
-| `nl2sh stop` | unload the model from memory |
-| `nl2sh config --set threads=3` | change settings |
+| `whatisit setup --model <gguf>` | register a local model file |
+| `whatisit doctor` | check the install and report what's missing |
+| `whatisit stop` | unload the model from memory |
+| `whatisit config --set threads=3` | change settings |
 
 ## Security notes
 
-**Never run `nl2sh` through `sudo`.** Three environment variables
-(`NL2SH_LLAMA_SERVER`, `NL2SH_LLAMA_CLI`, `NL2SH_RUNTIME_LIB`) point at the
-binaries and shared libraries it executes. That is harmless when it is your own
+**Never run `whatisit` through `sudo`.** Three environment variables
+(`WHATISIT_LLAMA_SERVER`, `WHATISIT_LLAMA_CLI`, `WHATISIT_RUNTIME_LIB`) point at
+the binaries and shared libraries it executes. That is harmless when it is your own
 environment running as you, but across a privilege boundary -- `sudo -E`, a cron
 or setuid wrapper -- they become a way to run an arbitrary binary as root.
 
@@ -81,14 +81,14 @@ destructive one is a real observed failure mode.
 **The model stays resident.** The first query starts a small local server that
 holds the model in RAM; later queries reuse it. Reloading a ~1 GB model per
 invocation costs several seconds and is most of what makes local tools feel
-slow. `nl2sh stop` unloads it.
+slow. `whatisit stop` unloads it.
 
 **Threads default to half your cores, capped at 4.** Decoding is limited by
 memory bandwidth, not compute — measured at ~31 GB/s saturated by both a 1.5B
 and a 4B model — so throughput stops improving well before your core count,
 and spending every core only spins the fans.
 
-**Zero Python dependencies.** `pip install nl2sh` cannot disturb anything else
+**Zero Python dependencies.** `pip install whatisit` cannot disturb anything else
 in your environment.
 
 ## Model

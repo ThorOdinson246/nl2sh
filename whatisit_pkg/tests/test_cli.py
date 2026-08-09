@@ -1,4 +1,4 @@
-"""Tests for nl2sh.cli argument parsing and dispatch.
+"""Tests for whatisit.cli argument parsing and dispatch.
 
 These cover cases that were REAL bugs found by typing realistic requests:
   - unquoted natural language must not be swallowed by argparse subparsers
@@ -13,7 +13,7 @@ monkeypatched wherever cmd_query would otherwise call into it.
 """
 import pytest
 
-from nl2sh import cli
+from whatisit import cli
 
 # ------------------------------------------------------------------ QueryArgs
 
@@ -90,7 +90,7 @@ class TestSubcommandRoutingIsFirstTokenOnly:
         assert called.get("hit") is True
 
     def test_subcommand_word_buried_in_sentence_is_not_routed(self, monkeypatch):
-        # "nl2sh show me the git config" must stay a plain-English question,
+        # "whatisit show me the git config" must stay a plain-English question,
         # not be treated as the `config` subcommand, because "config" is not
         # the first token.
         captured = {}
@@ -135,7 +135,7 @@ class TestCmdQueryQuietDangerRefusal:
 
     def test_no_model_found_reports_and_exits_3(self, monkeypatch):
         def raise_not_found(prompt, cfg, n=1, force_oneshot=False, quiet=False):
-            raise FileNotFoundError("no model found -- run `nl2sh setup`")
+            raise FileNotFoundError("no model found -- run `whatisit setup`")
         monkeypatch.setattr(cli.engine, "generate", raise_not_found)
         rc = cli.main(["do", "something"])
         assert rc == 3
