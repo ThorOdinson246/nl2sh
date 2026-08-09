@@ -26,6 +26,12 @@ Three pieces: the CLI, the model file, and a `llama.cpp` build to run it.
 **1. The CLI.**
 
 ```bash
+pip install whatisit
+```
+
+Or from source, if you want to hack on it:
+
+```bash
 git clone https://github.com/ThorOdinson246/whatisit-nl2sh
 cd whatisit-nl2sh && pip install ./whatisit_pkg
 ```
@@ -56,8 +62,7 @@ whatisit doctor
 `--bin-dir` is the directory containing `llama-server`, not the binary itself.
 `doctor` tells you which of the three pieces is missing if something's off.
 
-Python 3.9+, Linux or macOS. No PyPI release yet, so the CLI installs from
-source.
+Python 3.9+, Linux or macOS. The CLI has no dependencies of its own.
 
 ## Use
 
