@@ -1,139 +1,105 @@
 # Contributing
 
-This file governs commit hygiene going forward. It does not apply
-retroactively — the existing history stays exactly as it is.
+Thanks for taking a look. Bug reports and small, focused pull requests are
+both welcome.
 
-## Commit message format
+## Getting set up
+
+```bash
+git clone https://github.com/ThorOdinson246/whatisit-nl2sh
+cd whatisit-nl2sh/whatisit_pkg
+pip install -e ".[dev]"
+pytest
+```
+
+You do not need the model or a `llama.cpp` build to run the test suite. Every
+test either mocks the HTTP layer or works on strings, so the whole thing runs
+in a couple of seconds on any machine.
+
+To exercise the tool end to end you do need both. See the README's install
+section, then `whatisit doctor` to check what is missing.
+
+## Before you open a pull request
+
+```bash
+ruff check .
+pytest -q --cov=whatisit
+```
+
+CI runs the same two commands on Python 3.9 through 3.12 on Linux, plus 3.12
+on macOS. It also builds the wheel and sdist, checks the packaging metadata
+with `twine`, installs both into clean virtualenvs, and asserts that the CLI
+starts and exits with the right codes when no model is present.
+
+Two things that will fail CI and are easy to miss:
+
+- Coverage has a floor. Adding a substantial untested code path will drop it
+  below the threshold.
+- Do not run `ruff format`. The codebase is hand-formatted and the safety
+  tests in particular are laid out deliberately; a reformat produces a huge
+  diff that buries the actual change.
+
+## The safety checker
+
+`whatisit_pkg/whatisit/safety.py` decides whether a generated command gets
+flagged `DANGER` (never auto-run) or `CAUTION` (warned, still the user's call).
+It has 304 regression cases in `tests/test_safety.py`, and it is the one file
+where extra care is expected:
+
+- Every rule in it came from a command the model actually produced. If you add
+  a rule, add the command that motivated it as a test case.
+- Adding a case is always welcome, especially a false positive — a benign
+  command that gets flagged is a real bug, because it trains people to ignore
+  the warning.
+- It is a denylist over a Turing-complete language, not a sandbox. A pull
+  request that describes it as making the tool "safe" will get pushback on the
+  wording, not the code.
+
+If you find a bypass, a plain issue with the exact command is enough. You do
+not need to write the fix.
+
+## Commit messages
 
 ```
 <type>(<scope>): <subject>
-
-<body>
 ```
 
-- **Subject line**: imperative mood ("add", "fix", "close" — not "added",
-  "fixes", "closed"), no trailing period, **72 characters or fewer**.
-- **Body** (optional but encouraged for anything non-trivial): explain *why*
-  the change was made and what it does to observable behavior — not a
-  restatement of the diff. If there's a measured before/after number
-  (accuracy, latency, test count), put it here or in the subject.
-- Wrap body lines at ~72 characters. Leave a blank line between subject and
-  body.
-
-### Types
+Imperative mood ("add", "fix", not "added", "fixes"), no trailing period, 72
+characters or fewer. A body is optional; use it to explain why the change was
+made and what it does to observable behaviour, rather than restating the diff.
+If there is a measured before/after number, put it there.
 
 | type | use for |
 |---|---|
 | `feat` | a new user-facing capability |
-| `fix` | correcting broken or wrong behavior (a bug, a security bypass, a wrong number) |
-| `chore` | maintenance with no source-behavior change: gitignore, tracked-file cleanup, dependency bumps |
+| `fix` | correcting broken or wrong behaviour |
 | `docs` | documentation only |
-| `test` | adding or changing tests without changing production behavior |
-| `refactor` | restructuring code with no behavior change (includes moving/renaming files) |
-| `perf` | a performance improvement, ideally with a measured number |
-| `ci` | CI/build/packaging configuration |
+| `test` | tests, without changing production behaviour |
+| `refactor` | restructuring with no behaviour change, including renames |
+| `perf` | a performance improvement, ideally measured |
+| `chore` | maintenance with no source-behaviour change |
+| `ci` | CI, build and packaging config |
 
-If a change is hard to place, pick the type that describes the *primary*
-effect a reader cares about — a bug fix that happens to touch tests is
-still `fix`, not `test`.
+Scopes are `cli`, `safety`, `engine`, `docs` and `ci`. Omit the scope for
+anything repo-wide. If a change is hard to place, pick the type describing the
+primary effect a reader cares about — a bug fix that touches tests is still
+`fix`.
 
-### Scopes
-
-Use one of these when the change is localized; omit the scope for anything
-repo-wide (e.g. a `.gitignore` chore, a root README update).
-
-| scope | covers |
-|---|---|
-| `cli` | `whatisit_pkg/whatisit/cli.py`, `__main__.py`, argument parsing, user-facing output |
-| `safety` | `whatisit_pkg/whatisit/safety.py` and its test suite |
-| `engine` | `whatisit_pkg/whatisit/engine.py`, `hostctx.py`, `extract.py`, `config.py` — the model-serving/inference path |
-| `eval` | `scripts/eval/`, benchmark harness, scoring |
-| `data` | `scripts/data/`, dataset assembly and cleaning |
-| `train` | `scripts/train/`, `scripts/distill/` — training and distillation |
-| `docs` | the root `README.md`, package `README.md`, contributor guides |
-| `ci` | `.github/`, `pyproject.toml`, packaging/release config |
-
-## Examples, drawn from this project's own history
-
-**Bad** (an actual past subject line — vague, no type, no scope, describes
-the author's intent rather than the effect):
+An example:
 
 ```
-Queue the retrain and benchmark chain
+fix(safety): close 18 bypasses found by an adversarial audit
+
+Covers wrapper verbs (/bin/rm, sudo, env, nice, nohup), shell-string
+indirection (bash -c "rm -rf /"), .. traversal, and critical-file
+targets for shred and unlink. Each has a regression case.
 ```
 
-**Good** — same change, made production-shaped:
+## Scope of the project
 
-```
-chore(train): queue retrain-and-benchmark run on ALFA-augmented pool
+This is a small tool with a deliberately narrow remit: turn one plain-English
+request into one shell command, locally, with no network. Things like
+multi-turn conversation, shell state and remote model backends are out of
+scope by design rather than by omission.
 
-Training data grew from 104k to 123.7k rows after ingesting the
-paper's published ALFA train split and removing 34 leaking rows.
-Queues the retrain + official-harness rerun to measure the effect
-before deciding whether to adopt it.
-```
-
----
-
-**Bad** (result buried in a long, run-on subject with no type/scope):
-
-```
-Retrain on the ALFA-augmented pool: 0.560 -> 0.617 official, p=0.043
-```
-
-**Good**:
-
-```
-feat(train): retrain on ALFA-augmented pool, 0.560 -> 0.617 official
-
-Paired McNemar on the same 300 tasks: b=40 new wins, c=23 old wins,
-p=0.043. The 941 MB 1.5B model is now indistinguishable from the
-untuned 7B (0.620 vs 0.613, p=0.91). Per-task outputs for both arms
-are in scripts/icalfa_udocker/, including the 23 regressions.
-```
-
----
-
-**Bad** (mixes scope into a free-text prefix instead of the conventional
-`type(scope):` slot):
-
-```
-safety: fix 18+ bypasses found by a third adversarial audit
-```
-
-**Good**:
-
-```
-fix(safety): close 18 bypasses found by third adversarial audit
-
-Includes wrapper-verb bypasses (/bin/rm, sudo, env, nice, nohup),
-shell-string indirection (bash -c "rm -rf /"), .. traversal, and
-critical-file targets for shred/unlink. Regression suite:
-whatisit_pkg/tests/test_safety.py, 95/95 at the time of this commit.
-```
-
-## Using the commit template
-
-A `.gitmessage` template with the format above is checked in at the repo
-root. To have `git commit` (no `-m`) open it by default:
-
-```bash
-git config commit.template .gitmessage
-```
-
-This is local-only (it edits your own `.git/config`, not anything checked
-in), so each contributor opts in individually.
-
-## Optional commit-msg hook
-
-`hooks/commit-msg` can check that a commit subject matches
-`type(scope): subject` (or `type: subject` for repo-wide changes) and warn
-(not block) otherwise. It is **not** installed automatically — nothing in
-this repo touches `.git/hooks` on your behalf. To opt in:
-
-```bash
-cp hooks/commit-msg .git/hooks/commit-msg
-chmod +x .git/hooks/commit-msg
-```
-
-Remove it the same way (`rm .git/hooks/commit-msg`) at any time.
+The training and evaluation pipeline is not part of this repository.
