@@ -21,6 +21,20 @@ cloud API isn't allowed.
 
 ## Install
 
+```bash
+pip install whatisit
+whatisit setup
+```
+
+`setup` works out what your machine needs, tells you the size of each download
+and asks before starting it, then checks the files it fetched. On Linux with a
+glibc older than 2.34 it picks a compatibility build, since the upstream
+`llama.cpp` binaries will not start there.
+
+That's it. If you'd rather choose the pieces yourself, read on.
+
+### Setting it up by hand
+
 Three pieces: the CLI, the model file, and a `llama.cpp` build to run it.
 
 **1. The CLI.**
@@ -48,9 +62,11 @@ it, or use `huggingface-cli download` with the same arguments.
 
 **3. A llama.cpp build.** Grab the release archive for your platform from
 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) and unzip
-it. You need `llama-server` (and `llama-cli` for the fallback path). If you'd
-rather build from source or already have it via Homebrew, that's fine too, just
-note where `llama-server` ended up.
+it. You need `llama-server` (and `llama-cli` for the fallback path). Those
+builds need glibc 2.34 or newer; on an older distro build from source, or let
+`whatisit setup` fetch the compatibility build for you. If you'd rather build
+from source or already have it via Homebrew, that's fine too, just note where
+`llama-server` ended up.
 
 **4. Point whatisit at both.**
 
@@ -176,12 +192,19 @@ medium, and +9 points on hard** — it buys you nothing on the queries you'd hav
 got right anyway, and the most on the ones you'd have had to look up. It costs
 2.3x the latency for that.
 
-To switch, download the other file and point `whatisit setup` at it:
+To switch:
+
+```bash
+whatisit setup --size 3b
+whatisit stop     # drop the resident server; the next call loads the new model
+```
+
+Or download the file yourself and point `whatisit setup` at it:
 
 ```bash
 hf download ThorOdinson246/nl2sh-3b-Q4_K_M nl2sh-3b-Q4_K_M.gguf --local-dir .
 whatisit setup --model ./nl2sh-3b-Q4_K_M.gguf
-whatisit stop     # drop the resident server; the next call loads the new model
+whatisit stop
 ```
 
 Switching back is the same two commands with the other file. Both models live

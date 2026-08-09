@@ -219,6 +219,55 @@ class TestExtract:
             fetch.extract_runtime(archive, tmp_path / "dest")
         assert not (tmp_path / "escaped").exists()
 
+    def test_soname_symlink_chain_survives(self, tmp_path):
+        """The .so version links must be extracted, not skipped.
+
+        llama-server links against the SONAME libllama-common.so.0, which is a
+        symlink to the real .so.0.17.0. Drop it and the extraction looks fine
+        but the binary cannot start.
+        """
+        src = tmp_path / "src" / "llama-b1"
+        src.mkdir(parents=True)
+        (src / "llama-server").write_text("#!/bin/sh\n")
+        (src / "libllama-common.so.0.17.0").write_text("real")
+        archive = tmp_path / "r.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(src, arcname="llama-b1")
+            link = tarfile.TarInfo("llama-b1/libllama-common.so.0")
+            link.type, link.linkname = tarfile.SYMTYPE, "libllama-common.so.0.17.0"
+            tf.addfile(link)
+
+        out = fetch.extract_runtime(archive, tmp_path / "dest")
+        soname = out / "libllama-common.so.0"
+        assert soname.is_symlink()
+        assert soname.resolve().read_text() == "real"
+
+    def test_symlink_escaping_the_directory_is_rejected(self, tmp_path):
+        src = tmp_path / "src" / "llama-b1"
+        src.mkdir(parents=True)
+        (src / "llama-server").write_text("#!/bin/sh\n")
+        archive = tmp_path / "r.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(src, arcname="llama-b1")
+            evil = tarfile.TarInfo("llama-b1/passwd")
+            evil.type, evil.linkname = tarfile.SYMTYPE, "../../../../etc/passwd"
+            tf.addfile(evil)
+        with pytest.raises(fetch.FetchError, match="link escapes"):
+            fetch.extract_runtime(archive, tmp_path / "dest")
+
+    def test_absolute_symlink_is_rejected(self, tmp_path):
+        src = tmp_path / "src" / "llama-b1"
+        src.mkdir(parents=True)
+        (src / "llama-server").write_text("#!/bin/sh\n")
+        archive = tmp_path / "r.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(src, arcname="llama-b1")
+            evil = tarfile.TarInfo("llama-b1/shadow")
+            evil.type, evil.linkname = tarfile.SYMTYPE, "/etc/shadow"
+            tf.addfile(evil)
+        with pytest.raises(fetch.FetchError, match="absolute link target"):
+            fetch.extract_runtime(archive, tmp_path / "dest")
+
     def test_archive_without_llama_server_is_an_error(self, tmp_path):
         src = tmp_path / "s"
         src.mkdir()
@@ -354,6 +403,48 @@ class TestSetupCommand:
         assert rc == 0
         assert (home / "data" / "bin" / "llama-server").resolve() == found.resolve()
         assert "linked runtime" in capsys.readouterr().out
+
+    def test_compat_runtime_switches_the_transport_to_tcp(self, home, monkeypatch, tmp_path):
+        """That build cannot bind a UNIX socket; without this the first query
+        fails with 'couldn't bind HTTP server socket'."""
+        monkeypatch.setattr(fetch, "runtime_plan",
+                            lambda *a, **k: {"kind": "compat", "url": "https://x/c.tar.gz",
+                                             "sha256": "abc", "size": 10, "reason": "old glibc",
+                                             "warn": ""})
+        monkeypatch.setattr(fetch, "existing_llama_server", lambda: None)
+        monkeypatch.setattr(fetch, "free_bytes", lambda p: 10 ** 12)
+        monkeypatch.setattr(fetch, "download",
+                            lambda url, dest, **k: (dest.parent.mkdir(parents=True, exist_ok=True),
+                                                    dest.write_bytes(b"x"), dest)[-1])
+
+        unpacked = tmp_path / "unpacked"
+        unpacked.mkdir()
+        (unpacked / "llama-server").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(fetch, "extract_runtime", lambda a, d: unpacked)
+
+        cfg = {}
+        assert cli.cmd_setup(_Args(auto=True, runtime_only=True), cfg) == 0
+        assert cfg["force_tcp"] is True
+
+    def test_upstream_runtime_leaves_the_transport_alone(self, home, monkeypatch, tmp_path):
+        monkeypatch.setattr(fetch, "runtime_plan",
+                            lambda *a, **k: {"kind": "upstream", "url": "https://x/u.tar.gz",
+                                             "sha256": None, "size": 10, "reason": "", "warn": ""})
+        monkeypatch.setattr(fetch, "existing_llama_server", lambda: None)
+        monkeypatch.setattr(fetch, "free_bytes", lambda p: 10 ** 12)
+        monkeypatch.setattr(fetch, "release_digests",
+                            lambda b, **k: {fetch.asset_name(b): "abc"})
+        monkeypatch.setattr(fetch, "download",
+                            lambda url, dest, **k: (dest.parent.mkdir(parents=True, exist_ok=True),
+                                                    dest.write_bytes(b"x"), dest)[-1])
+        unpacked = tmp_path / "unpacked"
+        unpacked.mkdir()
+        (unpacked / "llama-server").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(fetch, "extract_runtime", lambda a, d: unpacked)
+
+        cfg = {}
+        assert cli.cmd_setup(_Args(auto=True, runtime_only=True), cfg) == 0
+        assert "force_tcp" not in cfg
 
     def test_non_default_size_is_reachable_through_the_fixed_slot(self, home, monkeypatch):
         def fake_download(url, dest, sha256=None, expected_size=None, progress=None):

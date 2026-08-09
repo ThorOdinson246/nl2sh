@@ -400,6 +400,12 @@ def _setup_auto(args, cfg: dict, models_dir: Path, bin_dir: Path) -> int:
     try:
         if need_runtime:
             _fetch_runtime(args, plan, bin_dir)
+            if plan["kind"] == "compat":
+                # That build predates UNIX-socket support in llama-server, so
+                # the default transport would start and immediately fail to
+                # bind. Recorded here rather than discovered at first query.
+                cfg["force_tcp"] = True
+                print("  note: this build serves over a local TCP port")
         if need_model:
             _fetch_model(args, spec, model_file, slot)
     except fetch.FetchError as e:

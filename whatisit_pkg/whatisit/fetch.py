@@ -297,17 +297,28 @@ def download(url: str, dest: Path, sha256: str | None = None,
 # --------------------------------------------------------------------------
 
 def _safe_members(tf: tarfile.TarFile, root: Path):
-    """Reject absolute paths, traversal and links before extracting.
+    """Reject anything that would write outside `root`.
 
     Python 3.12 has `filter="data"` for this, but the package supports 3.9.
+
+    Symlinks are kept, not skipped: the shared libraries ship as a chain of
+    them (libllama-common.so -> .so.0 -> .so.0.17.0) and the loader resolves
+    the SONAME through that chain. Dropping them extracts files that look
+    complete and then fail with "cannot open shared object file".
     """
     root = root.resolve()
+    prefix = str(root) + os.sep
     for m in tf.getmembers():
-        if m.issym() or m.islnk():
-            continue
-        target = (root / m.name).resolve()
-        if not str(target).startswith(str(root) + os.sep):
+        where = os.path.normpath(os.path.join(str(root), m.name))
+        if not (where + os.sep).startswith(prefix):
             raise FetchError(f"refusing to extract {m.name!r}: escapes the target directory")
+        if m.issym() or m.islnk():
+            if os.path.isabs(m.linkname):
+                raise FetchError(f"refusing to extract {m.name!r}: absolute link target")
+            base = os.path.dirname(where) if m.issym() else str(root)
+            dest = os.path.normpath(os.path.join(base, m.linkname))
+            if not (dest + os.sep).startswith(prefix):
+                raise FetchError(f"refusing to extract {m.name!r}: link escapes the target")
         yield m
 
 
