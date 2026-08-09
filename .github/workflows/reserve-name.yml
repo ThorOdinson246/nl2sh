@@ -1,0 +1,151 @@
+name: Reserve PyPI name
+
+# ONE-OFF. Publishes a tiny placeholder so the `whatisit` name on PyPI is ours
+# before someone else takes it. Delete this file once the real package ships.
+#
+# Why this exists instead of using release.yml: pyproject.toml still declares
+# `name = "nl2sh"`, which belongs to an unrelated project on PyPI. Anything that
+# builds from pyproject would try to publish there and get a 403. So this
+# workflow builds its own throwaway package in a temp directory and never reads
+# or touches the repo's pyproject.
+#
+# Setup:
+#   1. PyPI -> Account settings -> API tokens -> "Add API token".
+#      Scope MUST be "Entire account": `whatisit` does not exist yet, so PyPI
+#      cannot scope a token to it. After the first publish, replace this with a
+#      project-scoped token and delete the account-wide one.
+#   2. GitHub -> this repo -> Settings -> Secrets and variables -> Actions
+#      -> New repository secret -> name it PYPI_API_TOKEN.
+#   3. Actions tab -> "Reserve PyPI name" -> Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: "PyPI name to reserve"
+        required: true
+        default: "whatisit"
+      version:
+        description: "Placeholder version"
+        required: true
+        default: "0.0.1"
+
+permissions: {}
+
+jobs:
+  reserve:
+    name: build and publish placeholder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse if the name is already taken
+        env:
+          PKG: ${{ inputs.package_name }}
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${PKG}/json")
+          if [ "$code" = "200" ]; then
+            echo "::error::${PKG} already exists on PyPI. Nothing to reserve."
+            exit 1
+          fi
+          if [ "$code" != "404" ]; then
+            echo "::error::Unexpected HTTP ${code} from PyPI; refusing to continue."
+            exit 1
+          fi
+          echo "${PKG} is unregistered. Proceeding."
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the placeholder
+        env:
+          PKG: ${{ inputs.package_name }}
+          VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Built in a temp dir on purpose. This must not see, read, or shadow
+          # the repository's own pyproject.toml or package directory.
+          work="$(mktemp -d)"
+          mkdir -p "${work}/${PKG}"
+
+          printf '__version__ = "%s"\n' "$VER" > "${work}/${PKG}/__init__.py"
+
+          cat > "${work}/README.md" <<EOF
+          # ${PKG}
+
+          Name reservation. The real release is coming shortly.
+
+          \`${PKG}\` turns a plain-English request into a shell command, running
+          entirely on your own machine on CPU. No GPU, no API key, no network.
+
+          Development happens at https://github.com/${GITHUB_REPOSITORY}
+
+          It is the companion to [whatwasit](https://pypi.org/project/whatwasit/),
+          which does local semantic search over your shell history.
+          EOF
+
+          cat > "${work}/pyproject.toml" <<EOF
+          [build-system]
+          requires = ["setuptools>=61"]
+          build-backend = "setuptools.build_meta"
+
+          [project]
+          name = "${PKG}"
+          version = "${VER}"
+          description = "Placeholder. Local natural-language-to-shell command generation, releasing shortly."
+          readme = "README.md"
+          requires-python = ">=3.9"
+          license = { text = "Apache-2.0" }
+          authors = [{ name = "Mukesh Poudel" }]
+          keywords = ["shell", "cli", "llm", "local", "bash"]
+          classifiers = [
+            "Development Status :: 1 - Planning",
+            "Environment :: Console",
+            "License :: OSI Approved :: Apache Software License",
+            "Programming Language :: Python :: 3",
+            "Topic :: System :: Shells",
+          ]
+          dependencies = []
+
+          [project.urls]
+          Homepage = "https://github.com/${GITHUB_REPOSITORY}"
+
+          [tool.setuptools.packages.find]
+          include = ["${PKG}*"]
+          EOF
+
+          python -m pip install --upgrade pip build
+          python -m build --outdir "${GITHUB_WORKSPACE}/reserve-dist" "${work}"
+          ls -l "${GITHUB_WORKSPACE}/reserve-dist"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: reserve-dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Confirm it is live
+        env:
+          PKG: ${{ inputs.package_name }}
+          VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if curl -fsS "https://pypi.org/pypi/${PKG}/${VER}/json" >/dev/null; then
+              echo "${PKG} ${VER} is live"
+              {
+                echo "## PyPI name reserved"
+                echo ""
+                echo "- **${PKG} ${VER}** is published and the name is yours"
+                echo "- https://pypi.org/project/${PKG}/"
+                echo ""
+                echo "Next: swap the account-wide token for a project-scoped one,"
+                echo "then delete this workflow."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "waiting for the index (${attempt}/5)"
+            sleep 5
+          done
+          echo "::error::${PKG} ${VER} not visible on PyPI after upload"
+          exit 1
