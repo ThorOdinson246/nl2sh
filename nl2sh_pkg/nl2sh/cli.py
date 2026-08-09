@@ -202,8 +202,19 @@ def cmd_setup(args, cfg: dict) -> int:
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     target = models_dir / cfg_mod.MODEL_NAME
+    # An explicit --model always wins. Without this, re-running setup to switch
+    # models silently kept the old one: the target name is fixed, so the
+    # existence check matched the previously registered file and the new path
+    # was ignored while setup still reported success.
+    if args.model and target.exists():
+        src = Path(args.model).expanduser().resolve()
+        if src.exists() and (not target.is_symlink() or
+                             target.resolve() != src):
+            target.unlink()
+            print(f"  replacing registered model with {src.name}")
     if target.exists():
-        print(f"  model already present: {target} "
+        shown = target.resolve().name if target.is_symlink() else target.name
+        print(f"  model already present: {shown} "
               f"({target.stat().st_size / 1e6:.0f} MB)")
     elif args.model:
         src = Path(args.model).expanduser().resolve()
@@ -248,7 +259,13 @@ def cmd_doctor(args, cfg: dict) -> int:
 
     model = cfg_mod.find_model()
     if model:
-        print(f"  {GREEN('ok')}    model      {model} ({model.stat().st_size / 1e6:.0f} MB)")
+        # The registered path is a fixed slot name, so a 3B installed here still
+        # sits at nl2sh-1.5b-....gguf. Report what the slot actually points at,
+        # otherwise doctor names the wrong model.
+        actual = model.resolve().name if model.is_symlink() else model.name
+        suffix = f"  [{actual}]" if actual != model.name else ""
+        print(f"  {GREEN('ok')}    model      {model} "
+              f"({model.stat().st_size / 1e6:.0f} MB){suffix}")
     else:
         print(f"  {RED('FAIL')}  model      not found -- run `nl2sh setup --model ...`")
         ok = False

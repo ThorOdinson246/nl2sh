@@ -125,37 +125,6 @@ then quantized to Q4_K_M.
 | hardware | one A100 80GB, about an hour |
 | data | 125,770 NL/command pairs |
 
-A few things that surprised me and might save you time:
-
-**Targeting all linear layers mattered more than rank.** The NAACL 2025 NL2SH
-paper fine-tuned this exact base model with r=64 and got *worse* results
-(0.21 to 0.19). I used half their rank but hit the MLP layers too, with
-alpha/r = 2.0 instead of 0.5 and a 20x higher LR. That flipped the outcome.
-
-**Raising rank past 32 did nothing.** I swept r=64, 128 and 256 holding
-everything else fixed. None of them beat r=32 by more than noise (r=128 was
-+0.007, McNemar p = 1.0). Biderman et al.'s "code needs r=256" finding did not
-transfer here.
-
-**Don't select checkpoints on eval loss.** Eval loss and benchmark accuracy
-only correlate at about rho 0.4 on this task. The r=64 run had the *best* eval
-loss and nearly the worst accuracy, so `load_best_model_at_end` would have
-shipped the wrong model.
-
-**Output parsing is worth a lot on the untuned model and nothing on the tuned
-one.** Stripping markdown fences and prose is worth about 15 points on base
-Qwen2.5-Coder-1.5B. On the fine-tuned model it's worth zero, because the
-fine-tune already taught it to emit a bare command. Nice side effect: none of
-the gain below is a post-processing artifact.
-
-**Quantization is a cliff, not a slope.** f16 scores 0.637 and Q4_K_M scores
-0.620. Q5_K_M and Q6_K recover none of that 1.7 points, so Q4_K_M is the right
-stop.
-
-There's a 3B version of the same recipe that scores 0.657, mostly by being
-better on the hard tasks (+9 points there vs +0 on easy ones). It's 2.3x
-slower, which is why the 1.5B is the default.
-
 ## Benchmarks
 
 Measured on [InterCode-ALFA](https://github.com/westenfelder/InterCode-ALFA),
@@ -206,37 +175,38 @@ To switch, download the other file and point `nl2sh setup` at it:
 
 ```bash
 hf download ThorOdinson246/nl2sh-3b-Q4_K_M nl2sh-3b-Q4_K_M.gguf --local-dir .
-nl2sh setup --model ./nl2sh-3b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
-nl2sh stop     # drop the old resident server; the next call loads the new model
+nl2sh setup --model ./nl2sh-3b-Q4_K_M.gguf
+nl2sh stop     # drop the resident server; the next call loads the new model
 ```
 
-Switching back is the same command with the other file. `nl2sh doctor` shows
-which one is currently registered.
+Switching back is the same two commands with the other file. Both models live
+wherever you downloaded them; `setup` just points nl2sh at one of them, so
+keeping both on disk costs nothing but the disk.
+
+`nl2sh doctor` names the model currently in use — it reports the registered
+slot and, in brackets, the file that slot actually points at.
 
 ## What it gets wrong
 
-Worth knowing before you trust it:
+This is still in development and will get things wrong. It assumes you know
+your way around a terminal well enough to read a command before running it and
+fix it if it's off.
 
-- **It inverts things.** Ask for "smallest first" and you may get largest
-  first. Ask for "case sensitive" and get `grep -i`. In adversarial testing
-  roughly 1 in 7 commands flipped some aspect of the request. These run
-  cleanly and look right, which is the worst kind of wrong.
-- On ordinary everyday requests, about 1 in 8 outputs is just wrong.
-- It's single-turn. No memory of your last command, no shell state.
-- It can't see your filesystem, so "delete the older backup" is a guess.
+- Single-turn. No memory of your last command, no shell state.
 - Output caps at 64 tokens. That's a command, not a script.
 - English only, and measured on one 300-task benchmark, which is not the same
-  thing as being good at shell.
+  as being good at shell.
 
 ## Safety
 
 Every generated command is checked before it's printed. The checker flags
 recursive deletes of critical paths, writes to raw block devices, chmod and
 chown across system paths, fork bombs, curl piped into a shell, crontab wipes,
-firewall flushes, private key exposure, and the same patterns hidden behind
-`sudo`, `env`, `nohup`, quoting tricks or `..` traversal. Findings come back as
-`DANGER` (never auto-run) or `CAUTION` (warned, still yours to approve). 191
-regression cases run in CI on Python 3.9 through 3.12.
+firewall flushes, private key exposure, reverse shells, credential
+exfiltration, and the same patterns hidden behind `sudo`, `env`, `nohup`,
+quoting tricks or `..` traversal. Findings come back as `DANGER` (never
+auto-run) or `CAUTION` (warned, still yours to approve). 304 regression cases
+run in CI on Python 3.9 through 3.12.
 
 It's a denylist over a Turing-complete language, not a sandbox. Every rule in
 it came from a command this model actually produced during testing, which means
