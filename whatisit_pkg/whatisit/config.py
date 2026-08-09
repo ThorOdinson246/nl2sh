@@ -1,8 +1,8 @@
 """Config + model resolution, following the XDG spec.
 
 Locations (overridable by env, which is what makes the tool testable):
-  config  $XDG_CONFIG_HOME/nl2sh/config.json   (~/.config/nl2sh)
-  models  $XDG_DATA_HOME/nl2sh/models          (~/.local/share/nl2sh)
+  config  $XDG_CONFIG_HOME/whatisit/config.json   (~/.config/whatisit)
+  models  $XDG_DATA_HOME/whatisit/models          (~/.local/share/whatisit)
 """
 from __future__ import annotations
 
@@ -11,7 +11,13 @@ import os
 import shutil
 from pathlib import Path
 
+# The tool was called nl2sh before it was renamed. The model files kept that
+# name -- MODEL_NAME below is a filename published on Hugging Face, not our
+# identifier, so it does not change.
 MODEL_NAME = "nl2sh-1.5b-Q4_K_M.gguf"
+
+LEGACY_NAME = "nl2sh"
+APP_NAME = "whatisit"
 SYSTEM_PROMPT = (
     "You are a shell command generator. Output exactly one line: a single "
     "POSIX/bash command that accomplishes the user's request. No prose, no "
@@ -29,14 +35,61 @@ DEFAULTS = {
 }
 
 
+def env(suffix: str, default: str | None = None) -> str | None:
+    """WHATISIT_<suffix>, falling back to the pre-rename NL2SH_<suffix>.
+
+    The fallback is permanent. Dropping it would fail silently: callers that
+    set only the old name would get the defaults instead of an error.
+    """
+    return os.environ.get(f"WHATISIT_{suffix}",
+                          os.environ.get(f"NL2SH_{suffix}", default))
+
+
 def config_dir() -> Path:
-    return Path(os.environ.get("NL2SH_CONFIG_DIR") or
-                Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nl2sh")
+    return Path(env("CONFIG_DIR") or
+                Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME)
 
 
 def data_dir() -> Path:
-    return Path(os.environ.get("NL2SH_DATA_DIR") or
-                Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "nl2sh")
+    return Path(env("DATA_DIR") or
+                Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / APP_NAME)
+
+
+def _legacy_dir(kind: str) -> Path:
+    base = {"config": (os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")),
+            "data": (os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))}[kind]
+    return Path(base) / LEGACY_NAME
+
+
+def migrate_legacy_dirs(echo=print) -> list[str]:
+    """Move ~/.config/nl2sh and ~/.local/share/nl2sh to their new names, once.
+
+    Fires only when the new directory is absent and the old one is present, so
+    it is idempotent and never overwrites. Skipped when the location came from
+    the environment: that path was chosen deliberately.
+    """
+    msgs = []
+    for kind, explicit, new in (("config", env("CONFIG_DIR"), config_dir()),
+                                ("data", env("DATA_DIR"), data_dir())):
+        old = _legacy_dir(kind)
+        if explicit or new.exists() or not old.is_dir():
+            continue
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old), str(new))
+        except OSError as e:
+            msgs.append(f"whatisit: could not move {old} to {new}: {e}")
+            continue
+        msgs.append(f"whatisit: moved {old} -> {new} (renamed from nl2sh)")
+        # setup registers the model and binaries as symlinks. Absolute ones
+        # survive the move; a relative one pointing outside now dangles.
+        for p in sorted(new.rglob("*")):
+            if p.is_symlink() and not p.exists():
+                msgs.append(f"whatisit: warning: {p} points at "
+                            f"{os.readlink(str(p))}, which no longer resolves")
+    for m in msgs:
+        echo(m)
+    return msgs
 
 
 def config_path() -> Path:
@@ -95,8 +148,8 @@ def resolve_threads(cfg: dict) -> int:
 
 
 def find_model() -> Path | None:
-    if env := os.environ.get("NL2SH_MODEL"):
-        p = Path(env)
+    if v := env("MODEL"):
+        p = Path(v)
         return p if p.exists() else None
     for cand in (data_dir() / "models" / MODEL_NAME,
                  Path.cwd() / MODEL_NAME):
@@ -106,8 +159,8 @@ def find_model() -> Path | None:
 
 
 def find_llama_cli() -> Path | None:
-    if env := os.environ.get("NL2SH_LLAMA_CLI"):
-        p = Path(env)
+    if v := env("LLAMA_CLI"):
+        p = Path(v)
         return p if p.exists() else None
     if w := shutil.which("llama-cli"):
         return Path(w)

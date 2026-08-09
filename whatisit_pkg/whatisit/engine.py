@@ -79,7 +79,7 @@ def _read_token() -> str | None:
 # A cap on how much of the server's response we will ever buffer. This is our
 # own llama-server, started by us with a small `-c 2048` context, so a normal
 # reply is at most a few KB -- but nothing upstream bounds `resp.read()`, and
-# a compromised, hung, or simply buggy server (or, with NL2SH_FORCE_TCP=1, a
+# a compromised, hung, or simply buggy server (or, with WHATISIT_FORCE_TCP=1, a
 # co-tenant that won the documented port-squat race) can otherwise stream an
 # unbounded response and OOM the client before a single byte is validated.
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -121,7 +121,7 @@ def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
 
     port = running_port()
     if port is None:
-        raise RuntimeError("no running nl2sh server")
+        raise RuntimeError("no running whatisit server")
     req = urllib.request.Request(f"http://{HOST}:{port}{endpoint}", data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         payload = _read_capped(r)
@@ -136,7 +136,7 @@ def _runtime_env() -> dict:
     """
     env = dict(os.environ)
     bundled = Path(__file__).resolve().parent.parent.parent / "runtime" / "lib"
-    if extra := os.environ.get("NL2SH_RUNTIME_LIB"):
+    if extra := cfg_mod.env("RUNTIME_LIB"):
         bundled = Path(extra)
     if bundled.is_dir():
         prev = env.get("LD_LIBRARY_PATH", "")
@@ -163,7 +163,7 @@ def _write_private(path: Path, text: str) -> None:
 
     O_NOFOLLOW: this writes the token/pid/port files inside a 0700 state dir,
     so a symlink planted there normally requires having already broken into
-    that directory -- but NL2SH_DATA_DIR is user-controlled, and if it is ever
+    that directory -- but WHATISIT_DATA_DIR is user-controlled, and if it is ever
     pointed at a shared or otherwise attacker-writable location, a pre-planted
     symlink here would silently redirect this write (with O_TRUNC!) onto
     whatever it points to. O_NOFOLLOW turns that into a hard ELOOP failure
@@ -225,7 +225,7 @@ def running_port() -> int | None:
 def _is_our_server(pid: int) -> bool:
     """Confirm a pid really is our llama-server before signalling it.
 
-    Without this, `nl2sh stop` blindly SIGTERMs whatever now owns a recycled
+    Without this, `whatisit stop` blindly SIGTERMs whatever now owns a recycled
     pid. On a long-lived shared node that is somebody's -- possibly your own --
     unrelated process.
     """
@@ -267,7 +267,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
     token = secrets.token_urlsafe(24)
     _write_private(_token_path(), token)
 
-    use_socket = os.environ.get("NL2SH_FORCE_TCP") != "1"
+    use_socket = cfg_mod.env("FORCE_TCP") != "1"
     if use_socket:
         sp = _sock_path()
         sp.unlink(missing_ok=True)
@@ -291,7 +291,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
         _write_private(_port_file(), str(port))
 
     if not quiet:
-        print("nl2sh: loading model into memory (first run only)...",
+        print("whatisit: loading model into memory (first run only)...",
               file=sys.stderr, end="", flush=True)
     deadline = time.time() + wait
     while time.time() < deadline:
@@ -316,7 +316,7 @@ def _query_server(port: int, prompt: str, cfg: dict, n: int,
 
     Getting this wrong was visible in real use: asking for 3 candidates used to
     set temperature=0.6 for ALL of them, so the greedy answer -- the one plain
-    `nl2sh` returns -- was absent from its own candidate list, and slot 1 was
+    `whatisit` returns -- was absent from its own candidate list, and slot 1 was
     just a dice roll. Observed: "count lines in all python files" offered
     `grep -R -l '^$' *.py | wc -l` (counts FILES CONTAINING BLANK LINES) as #1
     while correct answers sat at #2 and #3. Since callers treat #1 as the pick,
@@ -406,12 +406,12 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
     """Return (commands, elapsed_seconds, mode). Commands are already extracted."""
     model = cfg_mod.find_model()
     if model is None:
-        raise FileNotFoundError("no model found -- run `nl2sh setup`")
+        raise FileNotFoundError("no model found -- run `whatisit setup`")
     threads = cfg_mod.resolve_threads(cfg)
 
     server_bin = None
     if not force_oneshot:
-        sb = os.environ.get("NL2SH_LLAMA_SERVER")
+        sb = cfg_mod.env("LLAMA_SERVER")
         if sb and Path(sb).exists():
             server_bin = Path(sb)
         elif (c := cfg_mod.data_dir() / "bin" / "llama-server").exists():
@@ -433,7 +433,7 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         cli = cfg_mod.find_llama_cli()
         if cli is None:
             raise FileNotFoundError(
-                "neither llama-server nor llama-cli found -- run `nl2sh doctor`")
+                "neither llama-server nor llama-cli found -- run `whatisit doctor`")
         raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system)
         mode = "oneshot"
 
