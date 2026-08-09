@@ -1,4 +1,4 @@
-# whatisit
+# whatisit-nl2sh
 
 Ask for a shell command in plain English. Runs on your own machine, on CPU.
 No GPU, no API key, no network. Answers in about a second.
