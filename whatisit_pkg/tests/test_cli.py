@@ -165,3 +165,39 @@ class TestBuildParser:
         args = parser.parse_args(["setup", "--model", "/tmp/m.gguf", "--copy"])
         assert args.model == "/tmp/m.gguf"
         assert args.copy is True
+
+
+def test_trailing_flag_is_part_of_the_request_but_is_flagged():
+    """`whatisit list files -e` sends "-e" to the model. That is deliberate
+    (see QueryArgs) but silent, so it must at least be reported."""
+    a = cli.QueryArgs(["list", "files", "-e"])
+    assert a.execute is False
+    assert a.words == ["list", "files", "-e"]
+    assert a.stray_flags == ["-e"]
+
+
+def test_leading_flag_still_acts_as_a_flag():
+    a = cli.QueryArgs(["-e", "list", "files"])
+    assert a.execute is True
+    assert a.words == ["list", "files"]
+    assert a.stray_flags == []
+
+
+def test_double_dash_ends_flags_and_silences_the_note():
+    """`--` means the user meant it literally, so no note."""
+    a = cli.QueryArgs(["list", "files", "--", "-e"])
+    assert a.words == ["list", "files", "-e"]
+    assert a.stray_flags == []
+
+
+def test_flag_shaped_words_that_are_not_our_flags_are_left_alone():
+    """`find files -name test` must not warn: -name is not one of our flags."""
+    a = cli.QueryArgs(["find", "files", "-name", "test"])
+    assert a.words == ["find", "files", "-name", "test"]
+    assert a.stray_flags == []
+
+
+def test_subcommand_word_inside_a_question_stays_a_question():
+    a = cli.QueryArgs(["how", "do", "I", "stop", "a", "stuck", "process"])
+    assert a.words[0] == "how"
+    assert a.stray_flags == []
