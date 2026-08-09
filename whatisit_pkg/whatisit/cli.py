@@ -80,6 +80,25 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
         pass  # logging must never break the tool
 
 
+def _warn_stray_flags(args) -> None:
+    """Say when a flag ended up inside the request instead of acting as a flag.
+
+    Flags are only read before the request text, for the reasons in QueryArgs.
+    That is the right trade, but it makes `whatisit list files -e` send "-e" to
+    the model, which answers something strange. Silence there is the worst
+    outcome: the user sees a wrong command and no clue why. Goes to stderr, so
+    `$(whatisit -q ...)` stays clean.
+    """
+    stray = getattr(args, "stray_flags", None)
+    if not stray:
+        return
+    first = stray[0]
+    rest = " ".join(w for w in args.words if w not in stray)
+    print(DIM(f"  note: {first} was read as part of your request, not as a flag."),
+          file=sys.stderr)
+    print(DIM(f"        flags go first:  whatisit {first} {rest}"), file=sys.stderr)
+
+
 def cmd_query(args, cfg: dict) -> int:
     prompt = " ".join(args.words).strip()
     if not prompt:
@@ -113,6 +132,7 @@ def cmd_query(args, cfg: dict) -> int:
         print(cmds[0])
         if findings:
             print_findings(findings)
+        _warn_stray_flags(args)
         return 0
 
     for i, c in enumerate(cmds):
@@ -130,6 +150,7 @@ def cmd_query(args, cfg: dict) -> int:
     # Always flush before anything else reaches stderr, so the command is
     # never printed after messages that refer to it.
     sys.stdout.flush()
+    _warn_stray_flags(args)
 
     # Opt-in only (`whatisit config --set log_queries=true`). Shell requests can
     # contain hostnames, paths and credentials, so this is never on by default
@@ -638,6 +659,22 @@ class QueryArgs:
                 break                          # request text starts here
             i += 1
         self.words = argv[i:]
+
+        # A `--` anywhere in the request is an attempt to end the flags, not
+        # part of the question. Drop the first one so `whatisit list files -- -e`
+        # does what it looks like.
+        explicit = "--" in self.words
+        if explicit:
+            cut = self.words.index("--")
+            self.words = self.words[:cut] + self.words[cut + 1:]
+
+        # Flags only count before the request text (see the docstring), so a
+        # trailing `-e` silently becomes part of the question and the model
+        # answers something odd. Record it so the caller can say so rather
+        # than leaving the user to work it out. A `--` means the user already
+        # said they meant it literally, so stay quiet in that case.
+        known = _FLAGS_NOARG | _FLAGS_ARG
+        self.stray_flags = [] if explicit else [w for w in self.words if w in known]
 
 
 def main(argv=None) -> int:

@@ -55,6 +55,17 @@ MODELS = {
 
 # Rough extracted size of the runtime archive, for the disk-space check.
 RUNTIME_BYTES = 120_000_000
+
+# Download size of each upstream archive, for the "download it?" prompt. These
+# are the compressed tarballs, which is what the progress bar counts, so the
+# figure offered and the figure shown agree. Tied to LLAMA_BUILD: update both
+# together. The compat runtime carries its own size in COMPAT_RUNTIME.
+ASSET_BYTES = {
+    ("Linux", "x86_64"): 16_507_165,
+    ("Linux", "aarch64"): 13_377_770,
+    ("Darwin", "arm64"): 11_015_270,
+    ("Darwin", "x86_64"): 11_290_712,
+}
 USER_AGENT = "whatisit-setup"
 
 # Fallback for Linux boxes below MIN_GLIBC, where the upstream archive downloads
@@ -150,7 +161,11 @@ def runtime_plan(key: tuple | None = None) -> dict:
         return out
 
     def upstream():
-        out.update(kind="upstream", url=asset_url(key=key), size=RUNTIME_BYTES)
+        # size is the DOWNLOAD size, matching what the progress bar counts and
+        # what the compat branch reports. RUNTIME_BYTES is the extracted size
+        # and is used only for the disk-space check.
+        out.update(kind="upstream", url=asset_url(key=key),
+                   size=ASSET_BYTES.get(key, RUNTIME_BYTES))
         return out
 
     if key[0] != "Linux":

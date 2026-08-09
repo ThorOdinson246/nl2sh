@@ -497,3 +497,14 @@ class TestManualPathStillWorks:
         m.write_bytes(b"x")
         monkeypatch.setenv("NL2SH_MODEL", str(m))
         assert cfg_mod.find_model() == m
+
+
+def test_runtime_size_is_the_download_size_not_the_extracted_size():
+    """The prompt offers a size and the progress bar counts one; they must
+    agree. RUNTIME_BYTES is the extracted estimate and is only for the disk
+    check, so it must not leak into the offered figure."""
+    for key in fetch.ASSET_SUFFIX:
+        plan = fetch.runtime_plan(key=key)
+        assert plan["size"] == fetch.ASSET_BYTES[key]
+        assert plan["size"] != fetch.RUNTIME_BYTES
+        assert plan["size"] < fetch.RUNTIME_BYTES
