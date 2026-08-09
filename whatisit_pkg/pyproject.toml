@@ -4,19 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whatisit"
-version = "0.2.0"
+version = "0.2.1"
 description = "Natural language to shell command, fully local and fast. No API keys, no network."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Mukesh Poudel" }]
-keywords = ["shell", "cli", "llm", "local", "bash"]
+authors = [{ name = "ThorOdinson246", email = "110178596+ThorOdinson246@users.noreply.github.com" }]
+keywords = ["shell", "cli", "llm", "local", "local-first", "privacy", "bash",
+            "command-generation", "llama-cpp", "offline", "whatisit"]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
+  "Intended Audience :: Developers",
   "Intended Audience :: System Administrators",
   "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Topic :: System :: Shells",
+  "Topic :: Utilities",
 ]
 # Deliberately zero runtime dependencies: stdlib urllib talks to the local
 # server, so `pip install whatisit` cannot break someone's environment.
@@ -24,6 +34,12 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.5", "build>=1"]
+
+[project.urls]
+Homepage = "https://github.com/ThorOdinson246/whatisit-nl2sh"
+Repository = "https://github.com/ThorOdinson246/whatisit-nl2sh"
+Issues = "https://github.com/ThorOdinson246/whatisit-nl2sh/issues"
+Model = "https://huggingface.co/ThorOdinson246/nl2sh-1.5b-Q4_K_M"
 
 [project.scripts]
 whatisit = "whatisit.cli:main"
