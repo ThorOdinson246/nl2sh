@@ -169,9 +169,9 @@ Against the untuned 7B the difference is 0.007, which 300 tasks can't resolve
 7B". GPT-4o is about 11 points ahead and it's a cloud service you hand your
 shell context to.
 
-<sub>† GPT-4o's number is the one published by the benchmark authors. Every
-other row I measured myself with the unmodified upstream scorer at temperature
-0, `max_tokens=64`, embedding heuristic at threshold 0.75, icalfa 0.3.6.</sub>
+† GPT-4o's number is the one published by the benchmark authors. Every other
+row I measured myself with the unmodified upstream scorer at temperature 0,
+`max_tokens=64`, embedding heuristic at threshold 0.75, icalfa 0.3.6.
 
 ## Two sizes
 

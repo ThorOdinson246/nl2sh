@@ -226,15 +226,20 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5; do
-            if curl -fsS "https://pypi.org/pypi/whatisit/${VERSION}/json" >/dev/null; then
+          # The upload is synchronous but the index is not: the JSON API can
+          # lag a couple of minutes behind a successful upload. A short window
+          # here fails the run for a release that actually published fine.
+          for attempt in $(seq 1 20); do
+            if curl -fsS "https://pypi.org/pypi/whatisit/${VERSION}/json" >/dev/null 2>&1; then
               echo "whatisit ${VERSION} is live on PyPI"
               exit 0
             fi
-            echo "Waiting for PyPI index (attempt ${attempt}/5)..."
-            sleep 5
+            echo "Waiting for PyPI index (attempt ${attempt}/20)..."
+            sleep 15
           done
-          echo "::error::whatisit ${VERSION} not found on PyPI after upload"
+          echo "::error::whatisit ${VERSION} not visible on PyPI after 5 minutes."
+          echo "::error::Check https://pypi.org/project/whatisit/${VERSION}/ before re-running:"
+          echo "::error::the upload may have succeeded and only the index lagged."
           exit 1
 
       - name: Publish summary
