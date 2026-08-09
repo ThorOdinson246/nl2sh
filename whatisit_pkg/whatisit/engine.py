@@ -265,7 +265,11 @@ def start_server(model: Path, server_bin: Path, threads: int,
     token = secrets.token_urlsafe(24)
     _write_private(_token_path(), token)
 
-    use_socket = cfg_mod.env("FORCE_TCP") != "1"
+    # The UNIX socket is preferred (see _UnixHTTPConnection), but older
+    # llama-server builds read --host as a hostname and fail to bind, so the
+    # transport has to be settable. The token below applies either way.
+    use_socket = (cfg_mod.env("FORCE_TCP") != "1"
+                  and not cfg_mod.load_config().get("force_tcp"))
     if use_socket:
         sp = _sock_path()
         sp.unlink(missing_ok=True)

@@ -85,6 +85,17 @@ jobs:
           echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
 
           if [ "$EVENT_NAME" = "release" ]; then
+            # Releases are also used to host non-package assets (the runtime
+            # build). Only v<version> tags are package releases; anything else
+            # is not this workflow's business and must not fail it.
+            case "$RELEASE_TAG" in
+              v[0-9]*) ;;
+              *)
+                echo "Release $RELEASE_TAG is not a version tag; skipping publish"
+                echo "publish=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
             TAG_VERSION="${RELEASE_TAG#v}"
             if [ "$TAG_VERSION" != "$CURRENT" ]; then
               echo "::error::Release tag $RELEASE_TAG does not match package version $CURRENT"

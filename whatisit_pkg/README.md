@@ -18,7 +18,17 @@ rm -rf /
 
 ```bash
 pip install whatisit
+whatisit setup
+```
 
+`setup` fetches the model and a `llama.cpp` runtime, asking before each
+download and verifying the checksum afterwards. On Linux with a glibc older
+than 2.34 it picks a compatibility build, since the upstream binaries will not
+start there.
+
+To choose the pieces yourself instead:
+
+```bash
 # the model (941 MB)
 hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir .
 
@@ -29,8 +39,8 @@ whatisit setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
 whatisit doctor
 ```
 
-`setup` does not fetch anything itself yet; point it at the files above.
-`whatisit doctor` reports exactly what is missing.
+`whatisit doctor` reports exactly what is missing. `whatisit setup --print-urls`
+prints every URL and checksum, for machines with no route out.
 
 ## Use
 

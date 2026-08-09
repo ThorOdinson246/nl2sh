@@ -30,6 +30,9 @@ DEFAULTS = {
     # OFF by default. It is cheap (prefix-cached) but MEASURED HARMFUL on the
     # only benchmark available: 54.2% -> 45.1% pass, p=0.0004. See hostctx.py.
     "host_context": False,
+    # Serve over a TCP port instead of a UNIX socket. Set by `setup` when it
+    # installs a runtime whose llama-server cannot bind a socket path.
+    "force_tcp": False,
 }
 
 
