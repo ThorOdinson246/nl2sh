@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from . import config as cfg_mod
-from . import engine
+from . import engine, fetch
 from .safety import check
 
 # Colour only when attached to a terminal, and honour NO_COLOR.
@@ -191,10 +191,78 @@ def cmd_query(args, cfg: dict) -> int:
     return subprocess.run([shell, "-c", chosen]).returncode
 
 
+def _confirm(prompt: str, auto: bool) -> bool:
+    """Ask before spending someone's bandwidth. --auto is standing consent."""
+    if auto:
+        return True
+    if not sys.stdin.isatty():
+        print(f"  {YELLOW('skipped')}: {prompt} (no terminal to ask; use --auto)",
+              file=sys.stderr)
+        return False
+    try:
+        return input(f"  {prompt} [Y/n] ").strip().lower() in ("", "y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def _progress(got: int, total: int) -> None:
+    if not total:
+        return
+    bar = got * 30 // total
+    print(f"\r    [{'#' * bar}{'.' * (30 - bar)}] {got * 100 // total:3d}%  "
+          f"{fetch.fmt_size(got)} / {fetch.fmt_size(total)}", end="", file=sys.stderr)
+    if got >= total:
+        print(file=sys.stderr)
+
+
+def _model_targets(size: str, models_dir: Path):
+    """(real file, the fixed slot name the engine looks for)."""
+    spec = fetch.MODELS[size]
+    return models_dir / spec["file"], models_dir / cfg_mod.MODEL_NAME
+
+
+def cmd_setup_print_urls(args) -> int:
+    """Everything needed to fetch by hand, for machines with no route out."""
+    plan = fetch.runtime_plan()
+    spec = fetch.MODELS[args.size]
+    print(BOLD("whatisit setup --print-urls"))
+    if plan["kind"] == "none":
+        print(f"  runtime: {plan['reason']}")
+        print(fetch.manual_instructions())
+    else:
+        digest = plan["sha256"]
+        if plan["kind"] == "upstream":
+            try:
+                digest = fetch.release_digests(args.llama_version).get(
+                    fetch.asset_name(args.llama_version))
+            except fetch.FetchError:
+                digest = None
+        print("  runtime:")
+        print(f"    url    {plan['url']}")
+        print(f"    sha256 {digest or '(fetch from the GitHub release page)'}")
+    print("  model:")
+    print(f"    url    {fetch.model_url(args.size)}")
+    print(f"    sha256 {spec['sha256']}")
+    print(f"    size   {fetch.fmt_size(spec['size'])}")
+    print("\n  Then, once both are on this machine:")
+    print(f"    whatisit setup --model ./{spec['file']} --bin-dir ./llama/bin")
+    return 0
+
+
 def cmd_setup(args, cfg: dict) -> int:
+    if getattr(args, "print_urls", False):
+        return cmd_setup_print_urls(args)
+
     print(BOLD("whatisit setup"))
     models_dir = cfg_mod.data_dir() / "models"
     bin_dir = cfg_mod.data_dir() / "bin"
+
+    # An explicit path means the manual path, which is unchanged. Otherwise
+    # bare `setup` fetches what is missing.
+    if not (args.model or args.bin_dir):
+        return _setup_auto(args, cfg, models_dir, bin_dir)
+
     models_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -240,6 +308,10 @@ def cmd_setup(args, cfg: dict) -> int:
             dest.symlink_to(Path(src).resolve())
             print(f"  linked runtime: {dest} -> {src}")
 
+    return _finish_setup(cfg)
+
+
+def _finish_setup(cfg: dict) -> int:
     cfg.setdefault("threads", 0)
     p = cfg_mod.save_config(cfg)
     print(f"  config written: {p}")
@@ -247,6 +319,148 @@ def cmd_setup(args, cfg: dict) -> int:
           + DIM(f"(of {os.cpu_count()} cores; decode is memory-bound, not core-bound)"))
     print(f"\n{GREEN('Ready.')} Try:  whatisit list files changed this week")
     return 0
+
+
+def _setup_auto(args, cfg: dict, models_dir: Path, bin_dir: Path) -> int:
+    """Fetch whatever is missing, asking first and verifying afterwards."""
+    spec = fetch.MODELS[args.size]
+    model_file, slot = _model_targets(args.size, models_dir)
+    server = bin_dir / "llama-server"
+
+    want_model = not args.runtime_only
+    want_runtime = not args.model_only
+
+    need_model = want_model and not model_file.exists()
+    need_runtime = want_runtime and not server.exists()
+
+    if want_model and not need_model:
+        print(f"  model present: {model_file.name} "
+              f"({model_file.stat().st_size / 1e6:.0f} MB)")
+    if want_runtime and not need_runtime:
+        print(f"  runtime present: {server}")
+
+    plan = {"kind": "none", "reason": "", "warn": "", "url": None,
+            "sha256": None, "size": 0}
+    if need_runtime:
+        plan = fetch.runtime_plan()
+        if plan["warn"]:
+            print(f"  {YELLOW('note')}: {plan['warn']}")
+        if plan["kind"] == "none":
+            print(f"  {RED('no runtime available')}: {plan['reason']}")
+            print(fetch.manual_instructions())
+            if fetch.platform_key()[0] == "Linux":
+                print(fetch.source_build_instructions())
+            return 1
+        if plan["kind"] == "compat":
+            print(f"  {YELLOW('note')}: {plan['reason']}")
+            print("  using the compatibility build instead")
+
+        # Reusing an existing llama-server skips a download entirely.
+        found = fetch.existing_llama_server()
+        if found and _confirm(f"found {found} -- use it?", args.auto):
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            for name in ("llama-server", "llama-cli"):
+                src = found.parent / name
+                dest = bin_dir / name
+                if src.exists() and not dest.exists():
+                    dest.symlink_to(src.resolve())
+                    print(f"  linked runtime: {dest} -> {src}")
+            need_runtime = False
+
+    if not need_model and not need_runtime:
+        if args.dry_run:
+            print("  nothing to fetch")
+            return 0
+        return _finish_setup(cfg)
+
+    bytes_needed = (spec["size"] if need_model else 0) + \
+                   (fetch.RUNTIME_BYTES if need_runtime else 0)
+    if args.dry_run:
+        print("  would fetch:")
+        if need_runtime:
+            print(f"    runtime  {plan['url']}")
+        if need_model:
+            print(f"    model    {fetch.model_url(args.size)}  "
+                  f"({fetch.fmt_size(spec['size'])})")
+        print(f"  total about {fetch.fmt_size(bytes_needed)}; nothing was changed")
+        return 0
+
+    # Refuse before starting a download that cannot finish.
+    free = fetch.free_bytes(cfg_mod.data_dir())
+    if free < bytes_needed * 1.1:
+        print(f"  {RED('not enough disk space')}: need about "
+              f"{fetch.fmt_size(bytes_needed * 1.1)}, "
+              f"{fetch.fmt_size(free)} free at {cfg_mod.data_dir()}",
+              file=sys.stderr)
+        return 1
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if need_runtime:
+            _fetch_runtime(args, plan, bin_dir)
+        if need_model:
+            _fetch_model(args, spec, model_file, slot)
+    except fetch.FetchError as e:
+        print(f"  {RED('failed')}: {e}", file=sys.stderr)
+        print(fetch.manual_instructions(), file=sys.stderr)
+        return 1
+
+    return _finish_setup(cfg)
+
+
+def _fetch_runtime(args, plan: dict, bin_dir: Path) -> None:
+    sha = plan["sha256"]
+    if plan["kind"] == "upstream":
+        # Verify against GitHub's own published digest rather than a list
+        # maintained here, which would go stale on every version bump.
+        name = fetch.asset_name(args.llama_version)
+        sha = fetch.release_digests(args.llama_version).get(name)
+        if not sha:
+            raise fetch.FetchError(f"no published checksum for {name}")
+        url = fetch.asset_url(args.llama_version)
+    else:
+        url = plan["url"]
+
+    print(f"  llama.cpp runtime  ({fetch.fmt_size(plan['size'] or 0)})")
+    if not _confirm("download it?", args.auto):
+        raise fetch.FetchError("declined; nothing was downloaded")
+
+    staging = cfg_mod.data_dir() / "runtime"
+    archive = staging / url.rsplit("/", 1)[-1]
+    fetch.download(url, archive, sha256=sha, progress=_progress)
+    src_dir = fetch.extract_runtime(archive, staging / "unpacked")
+    archive.unlink(missing_ok=True)
+
+    # The binaries are dynamically linked against the .so files beside them and
+    # find them through RUNPATH=$ORIGIN, so the directory has to stay whole.
+    # Putting its contents directly in bin/ keeps that true and matches where
+    # the engine already looks.
+    for item in src_dir.iterdir():
+        dest = bin_dir / item.name
+        if dest.exists() or dest.is_symlink():
+            dest.unlink()
+        shutil.move(str(item), str(dest))
+    shutil.rmtree(staging / "unpacked", ignore_errors=True)
+    print(f"  runtime installed: {bin_dir}")
+
+
+def _fetch_model(args, spec: dict, model_file: Path, slot: Path) -> None:
+    print(f"  model {spec['file']}  ({fetch.fmt_size(spec['size'])})")
+    if not _confirm("download it?", args.auto):
+        raise fetch.FetchError("declined; nothing was downloaded")
+    fetch.download(fetch.model_url(args.size), model_file,
+                   sha256=spec["sha256"], expected_size=spec["size"],
+                   progress=_progress)
+    print(f"  model installed: {model_file}")
+    # The engine resolves a fixed slot name, so a non-default size still has to
+    # be reachable through it.
+    if slot != model_file:
+        if slot.exists() or slot.is_symlink():
+            slot.unlink()
+        slot.symlink_to(model_file)
+        print(f"  registered: {slot.name} -> {model_file.name}")
 
 
 def cmd_doctor(args, cfg: dict) -> int:
@@ -348,10 +562,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="bypass the resident server (slower; for debugging)")
 
     sub = ap.add_subparsers(dest="sub")
-    s = sub.add_parser("setup", help="first-run setup")
-    s.add_argument("--model", help="path to the GGUF model")
+    s = sub.add_parser("setup", help="first-run setup: fetch the runtime and model")
+    s.add_argument("--model", help="path to a GGUF model you already have")
     s.add_argument("--bin-dir", help="directory containing llama-server / llama-cli")
     s.add_argument("--copy", action="store_true", help="copy the model instead of symlinking")
+    s.add_argument("--auto", action="store_true",
+                   help="assume yes to every download; needs no terminal")
+    s.add_argument("--size", choices=sorted(fetch.MODELS), default="1.5b",
+                   help="which model to fetch (default 1.5b)")
+    s.add_argument("--llama-version", metavar="bXXXX", default=fetch.LLAMA_BUILD,
+                   help="pin a specific llama.cpp build")
+    s.add_argument("--runtime-only", action="store_true", help="fetch only llama.cpp")
+    s.add_argument("--model-only", action="store_true", help="fetch only the model")
+    s.add_argument("--dry-run", action="store_true",
+                   help="print what would be fetched and change nothing")
+    s.add_argument("--print-urls", action="store_true",
+                   help="print URLs and checksums, then exit (for offline machines)")
     s.set_defaults(func=cmd_setup)
 
     sub.add_parser("doctor", help="check the installation").set_defaults(func=cmd_doctor)
