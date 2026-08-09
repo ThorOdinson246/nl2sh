@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nl2sh.safety import check, worst  # noqa: E402
+from whatisit.safety import check, worst  # noqa: E402
 
 MUST_FLAG_DANGER = [
     # --- originally caught ---

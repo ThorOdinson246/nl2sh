@@ -1,4 +1,4 @@
-"""Tests for nl2sh.config: XDG path resolution, env overrides, thread policy,
+"""Tests for whatisit.config: XDG path resolution, env overrides, thread policy,
 and the permission-hardened config write.
 
 Every test isolates itself via monkeypatch env vars / tmp_path -- none of this
@@ -10,72 +10,76 @@ import stat
 
 import pytest
 
-from nl2sh import config as cfg_mod
+from whatisit import config as cfg_mod
 
 
 def _clear_xdg(monkeypatch):
-    for var in ("NL2SH_CONFIG_DIR", "NL2SH_DATA_DIR", "NL2SH_MODEL",
-                "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+    # Both families: the NL2SH_* names are still honoured as a fallback, so
+    # leaving one set in the ambient environment would silently steer a test.
+    for suffix in ("CONFIG_DIR", "DATA_DIR", "MODEL"):
+        for prefix in ("WHATISIT_", "NL2SH_"):
+            monkeypatch.delenv(prefix + suffix, raising=False)
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
         monkeypatch.delenv(var, raising=False)
 
 
 class TestConfigDirResolution:
-    def test_default_is_dot_config_nl2sh(self, monkeypatch, tmp_path):
+    def test_default_is_dot_config_whatisit(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
-        assert cfg_mod.config_dir() == tmp_path / ".config" / "nl2sh"
+        assert cfg_mod.config_dir() == tmp_path / ".config" / "whatisit"
 
     def test_xdg_config_home_override(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdgcfg"))
-        assert cfg_mod.config_dir() == tmp_path / "xdgcfg" / "nl2sh"
+        assert cfg_mod.config_dir() == tmp_path / "xdgcfg" / "whatisit"
 
-    def test_nl2sh_config_dir_wins_over_xdg(self, monkeypatch, tmp_path):
+    def test_whatisit_config_dir_wins_over_xdg(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdgcfg"))
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "explicit"))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "explicit"))
         assert cfg_mod.config_dir() == tmp_path / "explicit"
 
     def test_config_path_is_config_json_under_config_dir(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "c"))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "c"))
         assert cfg_mod.config_path() == tmp_path / "c" / "config.json"
 
 
 class TestDataDirResolution:
-    def test_default_is_local_share_nl2sh(self, monkeypatch, tmp_path):
+    def test_default_is_local_share_whatisit(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
-        assert cfg_mod.data_dir() == tmp_path / ".local/share" / "nl2sh"
+        assert cfg_mod.data_dir() == tmp_path / ".local/share" / "whatisit"
 
     def test_xdg_data_home_override(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdgdata"))
-        assert cfg_mod.data_dir() == tmp_path / "xdgdata" / "nl2sh"
+        assert cfg_mod.data_dir() == tmp_path / "xdgdata" / "whatisit"
 
-    def test_nl2sh_data_dir_wins_over_xdg(self, monkeypatch, tmp_path):
+    def test_whatisit_data_dir_wins_over_xdg(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdgdata"))
-        monkeypatch.setenv("NL2SH_DATA_DIR", str(tmp_path / "explicit-data"))
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "explicit-data"))
         assert cfg_mod.data_dir() == tmp_path / "explicit-data"
 
 
 class TestModelResolution:
-    def test_nl2sh_model_env_used_when_it_exists(self, monkeypatch, tmp_path):
+    def test_whatisit_model_env_used_when_it_exists(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         model = tmp_path / "custom.gguf"
         model.write_bytes(b"fake")
-        monkeypatch.setenv("NL2SH_MODEL", str(model))
+        monkeypatch.setenv("WHATISIT_MODEL", str(model))
         assert cfg_mod.find_model() == model
 
-    def test_nl2sh_model_env_pointing_nowhere_returns_none(self, monkeypatch, tmp_path):
+    def test_whatisit_model_env_pointing_nowhere_returns_none(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_MODEL", str(tmp_path / "does-not-exist.gguf"))
+        monkeypatch.setenv("WHATISIT_MODEL", str(tmp_path / "does-not-exist.gguf"))
         assert cfg_mod.find_model() is None
 
     def test_model_found_in_data_dir_models(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
         models_dir = tmp_path / "data" / "models"
         models_dir.mkdir(parents=True)
         model = models_dir / cfg_mod.MODEL_NAME
@@ -84,7 +88,7 @@ class TestModelResolution:
 
     def test_no_model_anywhere_returns_none(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
         monkeypatch.chdir(tmp_path)
         assert cfg_mod.find_model() is None
 
@@ -121,7 +125,7 @@ class TestSaveConfigPermissions:
     def test_config_dir_created_0700(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         cdir = tmp_path / "cfgdir"
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(cdir))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(cdir))
         cfg_mod.save_config(dict(cfg_mod.DEFAULTS))
         mode = stat.S_IMODE(cdir.stat().st_mode)
         assert mode == 0o700
@@ -129,27 +133,27 @@ class TestSaveConfigPermissions:
     def test_config_file_created_0600(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         cdir = tmp_path / "cfgdir"
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(cdir))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(cdir))
         p = cfg_mod.save_config(dict(cfg_mod.DEFAULTS))
         mode = stat.S_IMODE(p.stat().st_mode)
         assert mode == 0o600
 
     def test_pre_existing_loosely_permissioned_file_gets_fixed(self, monkeypatch, tmp_path):
         # fchmod on the open fd must re-tighten a file that pre-dates this
-        # fix (or was written by an older nl2sh), not just newly-created ones.
+        # fix (or was written by an older whatisit), not just newly-created ones.
         _clear_xdg(monkeypatch)
         cdir = tmp_path / "cfgdir"
         cdir.mkdir()
         p = cdir / "config.json"
         p.write_text("{}")
         os.chmod(p, 0o644)
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(cdir))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(cdir))
         cfg_mod.save_config(dict(cfg_mod.DEFAULTS))
         assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
     def test_written_config_round_trips_as_json(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "cfgdir"))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfgdir"))
         cfg = dict(cfg_mod.DEFAULTS)
         cfg["threads"] = 3
         p = cfg_mod.save_config(cfg)
@@ -159,12 +163,12 @@ class TestSaveConfigPermissions:
 class TestLoadConfig:
     def test_load_config_returns_defaults_when_absent(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "nope"))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "nope"))
         assert cfg_mod.load_config() == cfg_mod.DEFAULTS
 
     def test_load_config_merges_saved_values(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "cfgdir"))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfgdir"))
         cfg_mod.save_config({**cfg_mod.DEFAULTS, "threads": 2})
         loaded = cfg_mod.load_config()
         assert loaded["threads"] == 2
@@ -176,5 +180,101 @@ class TestLoadConfig:
         cdir = tmp_path / "cfgdir"
         cdir.mkdir()
         (cdir / "config.json").write_text("{not valid json")
-        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(cdir))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(cdir))
         assert cfg_mod.load_config() == cfg_mod.DEFAULTS
+
+
+class TestLegacyEnvFallback:
+    """The pre-rename NL2SH_* names stay honoured, permanently."""
+
+    def test_old_name_used_when_new_is_unset(self, monkeypatch, tmp_path):
+        _clear_xdg(monkeypatch)
+        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "legacy"))
+        assert cfg_mod.config_dir() == tmp_path / "legacy"
+
+    def test_new_name_wins_when_both_set(self, monkeypatch, tmp_path):
+        _clear_xdg(monkeypatch)
+        monkeypatch.setenv("NL2SH_CONFIG_DIR", str(tmp_path / "legacy"))
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "current"))
+        assert cfg_mod.config_dir() == tmp_path / "current"
+
+    def test_old_model_var_still_resolves(self, monkeypatch, tmp_path):
+        _clear_xdg(monkeypatch)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+        monkeypatch.setenv("NL2SH_MODEL", str(model))
+        assert cfg_mod.find_model() == model
+
+    def test_old_data_dir_still_resolves(self, monkeypatch, tmp_path):
+        _clear_xdg(monkeypatch)
+        monkeypatch.setenv("NL2SH_DATA_DIR", str(tmp_path / "legacy-data"))
+        assert cfg_mod.data_dir() == tmp_path / "legacy-data"
+
+
+class TestLegacyDirMigration:
+    def _home(self, monkeypatch, tmp_path):
+        _clear_xdg(monkeypatch)
+        monkeypatch.setattr(cfg_mod.Path, "home", lambda: tmp_path)
+
+    def test_moves_config_and_reports_once(self, monkeypatch, tmp_path):
+        self._home(monkeypatch, tmp_path)
+        old = tmp_path / ".config" / "nl2sh"
+        old.mkdir(parents=True)
+        (old / "config.json").write_text('{"threads": 3}')
+
+        msgs = cfg_mod.migrate_legacy_dirs(echo=lambda m: None)
+        assert any("moved" in m for m in msgs)
+        assert not old.exists()
+        assert cfg_mod.load_config()["threads"] == 3
+
+        # Idempotent: a second run has nothing to say.
+        assert cfg_mod.migrate_legacy_dirs(echo=lambda m: None) == []
+
+    def test_never_overwrites_an_existing_new_dir(self, monkeypatch, tmp_path):
+        self._home(monkeypatch, tmp_path)
+        old = tmp_path / ".config" / "nl2sh"
+        old.mkdir(parents=True)
+        (old / "config.json").write_text('{"threads": 3}')
+        new = tmp_path / ".config" / "whatisit"
+        new.mkdir(parents=True)
+        (new / "config.json").write_text('{"threads": 9}')
+
+        assert cfg_mod.migrate_legacy_dirs(echo=lambda m: None) == []
+        assert old.exists()
+        assert cfg_mod.load_config()["threads"] == 9
+
+    def test_skipped_when_dir_set_explicitly(self, monkeypatch, tmp_path):
+        self._home(monkeypatch, tmp_path)
+        (tmp_path / ".config" / "nl2sh").mkdir(parents=True)
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "elsewhere"))
+        assert not any("config" in m for m in
+                       cfg_mod.migrate_legacy_dirs(echo=lambda m: None))
+
+    def test_noop_when_nothing_to_migrate(self, monkeypatch, tmp_path):
+        self._home(monkeypatch, tmp_path)
+        assert cfg_mod.migrate_legacy_dirs(echo=lambda m: None) == []
+
+    def test_absolute_symlinks_survive_the_move(self, monkeypatch, tmp_path):
+        """setup registers the model as a symlink; it must still resolve."""
+        self._home(monkeypatch, tmp_path)
+        real = tmp_path / "store" / "nl2sh-1.5b-Q4_K_M.gguf"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"gguf")
+        old = tmp_path / ".local/share" / "nl2sh" / "models"
+        old.mkdir(parents=True)
+        (old / cfg_mod.MODEL_NAME).symlink_to(real)
+
+        msgs = cfg_mod.migrate_legacy_dirs(echo=lambda m: None)
+        assert not any("no longer resolves" in m for m in msgs)
+        moved = tmp_path / ".local/share" / "whatisit" / "models" / cfg_mod.MODEL_NAME
+        assert moved.is_symlink() and moved.exists()
+        assert cfg_mod.find_model() == moved
+
+    def test_broken_relative_symlink_is_reported(self, monkeypatch, tmp_path):
+        self._home(monkeypatch, tmp_path)
+        old = tmp_path / ".local/share" / "nl2sh" / "bin"
+        old.mkdir(parents=True)
+        (old / "llama-server").symlink_to("../../nl2sh/bin/real")
+
+        msgs = cfg_mod.migrate_legacy_dirs(echo=lambda m: None)
+        assert any("no longer resolves" in m for m in msgs)

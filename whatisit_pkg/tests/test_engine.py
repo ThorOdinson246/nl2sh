@@ -1,4 +1,4 @@
-"""Tests for nl2sh.engine, with the HTTP layer entirely mocked out.
+"""Tests for whatisit.engine, with the HTTP layer entirely mocked out.
 
 No test here ever starts llama-server, touches the network, or requires a
 model file: engine._post / engine._query_server / engine.start_server are all
@@ -10,8 +10,8 @@ import stat
 
 import pytest
 
-from nl2sh import config as cfg_mod
-from nl2sh import engine
+from whatisit import config as cfg_mod
+from whatisit import engine
 
 # ---------------------------------------------------------- looks_degenerate
 
@@ -175,10 +175,10 @@ class TestGenerateDiscardsTruncatedCandidates:
         monkeypatch.setattr(engine, "hostctx",
                              _FakeHostCtx())
         # Make server_bin resolution succeed without needing a real binary:
-        # NL2SH_LLAMA_SERVER just needs to point at a file that exists.
+        # WHATISIT_LLAMA_SERVER just needs to point at a file that exists.
         srv = tmp_path / "llama-server"
         srv.write_bytes(b"fake")
-        monkeypatch.setenv("NL2SH_LLAMA_SERVER", str(srv))
+        monkeypatch.setenv("WHATISIT_LLAMA_SERVER", str(srv))
         monkeypatch.setattr(engine, "start_server", lambda *a, **kw: 12345)
 
     def test_length_finish_reason_is_dropped(self, monkeypatch, tmp_path):
