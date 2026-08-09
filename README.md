@@ -40,9 +40,6 @@ hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir 
 If `hf` isn't found, your `huggingface_hub` predates the rename. Either upgrade
 it, or use `huggingface-cli download` with the same arguments.
 
-The model files are still called `nl2sh-*`. The tool used to go by that name and
-the weights kept it; they're the right files.
-
 **3. A llama.cpp build.** Grab the release archive for your platform from
 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) and unzip
 it. You need `llama-server` (and `llama-cli` for the fallback path). If you'd

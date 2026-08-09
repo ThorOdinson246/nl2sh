@@ -53,9 +53,8 @@ eval "$(whatisit -q show disk usage)"      # bare output, for scripting
 ## Security notes
 
 **Never run `whatisit` through `sudo`.** Three environment variables
-(`WHATISIT_LLAMA_SERVER`, `WHATISIT_LLAMA_CLI`, `WHATISIT_RUNTIME_LIB`, and the
-still-honoured `NL2SH_*` spellings of each) point at the
-binaries and shared libraries it executes. That is harmless when it is your own
+(`WHATISIT_LLAMA_SERVER`, `WHATISIT_LLAMA_CLI`, `WHATISIT_RUNTIME_LIB`) point at
+the binaries and shared libraries it executes. That is harmless when it is your own
 environment running as you, but across a privilege boundary -- `sudo -E`, a cron
 or setuid wrapper -- they become a way to run an arbitrary binary as root.
 

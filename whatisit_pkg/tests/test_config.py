@@ -139,8 +139,8 @@ class TestSaveConfigPermissions:
         assert mode == 0o600
 
     def test_pre_existing_loosely_permissioned_file_gets_fixed(self, monkeypatch, tmp_path):
-        # fchmod on the open fd must re-tighten a file that pre-dates this
-        # fix (or was written by an older whatisit), not just newly-created ones.
+        # fchmod on the open fd must re-tighten a pre-existing file, not just
+        # newly-created ones.
         _clear_xdg(monkeypatch)
         cdir = tmp_path / "cfgdir"
         cdir.mkdir()

@@ -65,11 +65,10 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
-        # Create at 0600 from the open() call itself rather than writing then
-        # chmod-ing after: the latter left the FIRST line -- a real shell
-        # request, which can contain hostnames, paths and secrets -- exposed
-        # at the umask-derived default mode (group-readable on a shared NFS
-        # home) for the whole window between the write and the chmod call.
+        # Create at 0600 from open() rather than chmod-ing after: write-then-
+        # chmod leaves the first line -- a real shell request, which can carry
+        # hostnames, paths and secrets -- readable at the umask default
+        # (group-readable on a shared NFS home) for the width of that window.
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         try:
             os.fchmod(fd, 0o600)   # also covers a pre-existing, wrongly-permissioned file
@@ -102,11 +101,9 @@ def cmd_query(args, cfg: dict) -> int:
         return 5
 
     # --quiet keeps STDOUT bare so it composes: x=$(whatisit -q ...).
-    # But it must still run the safety check. The README advertises
-    # eval "$(whatisit -q ...)" as the scripting idiom, and an earlier version
-    # returned here BEFORE check() was ever called -- so the one documented
-    # path that pipes straight into a shell was the one path with no checking
-    # at all. Warnings go to stderr, leaving stdout clean.
+    # It must still run the safety check: eval "$(whatisit -q ...)" is the
+    # documented scripting idiom, so this is the one path that pipes straight
+    # into a shell. Warnings go to stderr, leaving stdout clean.
     if args.quiet:
         findings = check(cmds[0])
         if any(sev == "DANGER" for sev, _ in findings):
@@ -202,10 +199,9 @@ def cmd_setup(args, cfg: dict) -> int:
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     target = models_dir / cfg_mod.MODEL_NAME
-    # An explicit --model always wins. Without this, re-running setup to switch
-    # models silently kept the old one: the target name is fixed, so the
-    # existence check matched the previously registered file and the new path
-    # was ignored while setup still reported success.
+    # An explicit --model always wins. The target name is fixed, so without
+    # this the existence check below matches the already-registered file and
+    # switching models is a silent no-op that still reports success.
     if args.model and target.exists():
         src = Path(args.model).expanduser().resolve()
         if src.exists() and (not target.is_symlink() or

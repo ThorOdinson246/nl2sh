@@ -12,8 +12,8 @@ import re
 
 # Model output is untrusted and goes straight to a terminal. Escape sequences
 # can conceal or repaint the command a user is about to approve (e.g. \x1b[8m
-# hides text), so they are removed before the string is ever printed, safety-
-# checked, or executed. Previously these survived into the displayed command.
+# hides text), so they are removed before the string is ever printed,
+# safety-checked, or executed.
 CONTROL_RE = re.compile(
     r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
 
