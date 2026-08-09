@@ -1,16 +1,16 @@
-# nl2sh
+# whatisit
 
 Ask for a shell command in plain English. Runs on your own machine, on CPU.
 No GPU, no API key, no network. Answers in about a second.
 
 ```console
-$ nl2sh find files bigger than 100MB in this folder
+$ whatisit find files bigger than 100MB in this folder
 find . -size +100M -exec ls -lh {} \;
 
-$ nl2sh compress the logs directory into a tarball
+$ whatisit compress the logs directory into a tarball
 tar -czf logs.tar.gz logs/
 
-$ nl2sh delete everything in the root directory
+$ whatisit delete everything in the root directory
   !! DANGER  recursive force-delete of a critical path
 rm -rf /
 ```
@@ -27,7 +27,7 @@ Three pieces: the CLI, the model file, and a `llama.cpp` build to run it.
 
 ```bash
 git clone https://github.com/ThorOdinson246/nl2sh
-cd nl2sh && pip install ./nl2sh_pkg
+cd nl2sh && pip install ./whatisit_pkg
 ```
 
 **2. The model, 941 MB.**
@@ -40,17 +40,20 @@ hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir 
 If `hf` isn't found, your `huggingface_hub` predates the rename. Either upgrade
 it, or use `huggingface-cli download` with the same arguments.
 
+The model files are still called `nl2sh-*`. The tool used to go by that name and
+the weights kept it; they're the right files.
+
 **3. A llama.cpp build.** Grab the release archive for your platform from
 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) and unzip
 it. You need `llama-server` (and `llama-cli` for the fallback path). If you'd
 rather build from source or already have it via Homebrew, that's fine too, just
 note where `llama-server` ended up.
 
-**4. Point nl2sh at both.**
+**4. Point whatisit at both.**
 
 ```bash
-nl2sh setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
-nl2sh doctor
+whatisit setup --model ./nl2sh-1.5b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
+whatisit doctor
 ```
 
 `--bin-dir` is the directory containing `llama-server`, not the binary itself.
@@ -64,7 +67,7 @@ source.
 Type the request as plain arguments. No quoting needed:
 
 ```bash
-nl2sh list files changed in the last week
+whatisit list files changed in the last week
 ```
 
 | flag | what it does |
@@ -79,13 +82,13 @@ Nothing runs unless you pass `-e` and confirm at the prompt. Anything flagged
 
 ```bash
 # use the result inline
-cd "$(nl2sh -q the directory holding the largest log file)"
+cd "$(whatisit -q the directory holding the largest log file)"
 
 # review, then run
-nl2sh -e remove every .pyc file under this tree
+whatisit -e remove every .pyc file under this tree
 ```
 
-`nl2sh stop` shuts down the resident model server. `nl2sh config --set threads=4`
+`whatisit stop` shuts down the resident model server. `whatisit config --set threads=4`
 changes settings.
 
 ## How it works
@@ -136,7 +139,7 @@ reference command. 300 tasks, pass or fail per task.
 |---|---|---|
 | GPT-4o, cloud API † | | 0.73 |
 | **nl2sh-3b** (optional, see below) | **1.9 GB** | **0.657** |
-| **nl2sh (this tool, default)** | **941 MB** | **0.620** |
+| **whatisit (this tool, default)** | **941 MB** | **0.620** |
 | Qwen2.5-Coder-7B, untuned | 4.4 GB | 0.613 |
 | Qwen2.5-Coder-1.5B, untuned (the base) | 941 MB | 0.540 |
 
@@ -171,19 +174,19 @@ medium, and +9 points on hard** — it buys you nothing on the queries you'd hav
 got right anyway, and the most on the ones you'd have had to look up. It costs
 2.3x the latency for that.
 
-To switch, download the other file and point `nl2sh setup` at it:
+To switch, download the other file and point `whatisit setup` at it:
 
 ```bash
 hf download ThorOdinson246/nl2sh-3b-Q4_K_M nl2sh-3b-Q4_K_M.gguf --local-dir .
-nl2sh setup --model ./nl2sh-3b-Q4_K_M.gguf
-nl2sh stop     # drop the resident server; the next call loads the new model
+whatisit setup --model ./nl2sh-3b-Q4_K_M.gguf
+whatisit stop     # drop the resident server; the next call loads the new model
 ```
 
 Switching back is the same two commands with the other file. Both models live
-wherever you downloaded them; `setup` just points nl2sh at one of them, so
+wherever you downloaded them; `setup` just points whatisit at one of them, so
 keeping both on disk costs nothing but the disk.
 
-`nl2sh doctor` names the model currently in use — it reports the registered
+`whatisit doctor` names the model currently in use — it reports the registered
 slot and, in brackets, the file that slot actually points at.
 
 ## What it gets wrong
@@ -216,7 +219,7 @@ before you run it.
 ## Development
 
 ```bash
-cd nl2sh_pkg
+cd whatisit_pkg
 pip install -e ".[dev]"
 pytest
 ```
