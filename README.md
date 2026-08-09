@@ -166,7 +166,8 @@ reference command. 300 tasks, pass or fail per task.
 | model | size on disk | pass rate |
 |---|---|---|
 | GPT-4o, cloud API † | | 0.73 |
-| **nl2sh (this tool)** | **941 MB** | **0.620** |
+| **nl2sh-3b** (optional, see below) | **1.9 GB** | **0.657** |
+| **nl2sh (this tool, default)** | **941 MB** | **0.620** |
 | Qwen2.5-Coder-7B, untuned | 4.4 GB | 0.613 |
 | Qwen2.5-Coder-1.5B, untuned (the base) | 941 MB | 0.540 |
 
@@ -181,6 +182,36 @@ shell context to.
 <sub>† GPT-4o's number is the one published by the benchmark authors. Every
 other row I measured myself with the unmodified upstream scorer at temperature
 0, `max_tokens=64`, embedding heuristic at threshold 0.75, icalfa 0.3.6.</sub>
+
+## Two sizes
+
+The default is the 1.5B. There's also a 3B, same recipe and same training data,
+if you'd rather have accuracy than speed.
+
+| | nl2sh-1.5b (default) | nl2sh-3b |
+|---|---|---|
+| size on disk | 941 MB | 1.9 GB |
+| pass rate | 0.620 | **0.657** |
+| generation | 39.5 tok/s | 17.3 tok/s |
+| peak RAM | ~1.8 GB | ~3.4 GB |
+| cold start | ~2 s | ~4 s |
+
+The 3B is +4.0 points, and where it wins is the useful part. Split by the
+benchmark's own difficulty labels, it is **level on easy tasks, +3 points on
+medium, and +9 points on hard** — it buys you nothing on the queries you'd have
+got right anyway, and the most on the ones you'd have had to look up. It costs
+2.3x the latency for that.
+
+To switch, download the other file and point `nl2sh setup` at it:
+
+```bash
+hf download ThorOdinson246/nl2sh-3b-Q4_K_M nl2sh-3b-Q4_K_M.gguf --local-dir .
+nl2sh setup --model ./nl2sh-3b-Q4_K_M.gguf --bin-dir /path/to/llama.cpp/bin
+nl2sh stop     # drop the old resident server; the next call loads the new model
+```
+
+Switching back is the same command with the other file. `nl2sh doctor` shows
+which one is currently registered.
 
 ## What it gets wrong
 
