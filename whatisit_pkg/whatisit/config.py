@@ -53,7 +53,7 @@ def data_dir() -> Path:
                 Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / APP_NAME)
 
 
-def _legacy_dir(kind: str) -> Path:
+def legacy_dir(kind: str) -> Path:
     base = {"config": (os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")),
             "data": (os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))}[kind]
     return Path(base) / LEGACY_NAME
@@ -69,7 +69,7 @@ def migrate_legacy_dirs(echo=print) -> list[str]:
     msgs = []
     for kind, explicit, new in (("config", env("CONFIG_DIR"), config_dir()),
                                 ("data", env("DATA_DIR"), data_dir())):
-        old = _legacy_dir(kind)
+        old = legacy_dir(kind)
         if explicit or new.exists() or not old.is_dir():
             continue
         try:

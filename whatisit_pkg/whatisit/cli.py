@@ -285,6 +285,16 @@ def cmd_doctor(args, cfg: dict) -> int:
     print(f"  {'ok' if port else 'idle'}  server pid {where}")
     print(f"  info  threads    {cfg_mod.resolve_threads(cfg)} (of {os.cpu_count()} cores)")
     print(f"  info  config     {cfg_mod.config_path()}")
+
+    # Both directories present means the one-time move was skipped rather than
+    # run: it never overwrites. Only worth saying here, where someone is
+    # already asking why the install looks wrong.
+    for kind in ("config", "data"):
+        legacy = cfg_mod.legacy_dir(kind)
+        current = cfg_mod.config_dir() if kind == "config" else cfg_mod.data_dir()
+        if legacy.is_dir() and current.is_dir():
+            print(f"  {YELLOW('warn')}  {kind:<10} {legacy} also exists and is unused; "
+                  f"{current} is the live one")
     print(f"\n{GREEN('All good.') if ok else RED('Not ready.')}")
     return 0 if ok else 1
 
