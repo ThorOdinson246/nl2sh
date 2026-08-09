@@ -18,8 +18,8 @@ rm -rf /
 
 ```bash
 # not on PyPI yet -- install from source
-git clone https://github.com/ThorOdinson246/nl2sh
-cd nl2sh && pip install ./whatisit_pkg
+git clone https://github.com/ThorOdinson246/whatisit-nl2sh
+cd whatisit-nl2sh && pip install ./whatisit_pkg
 
 # the model (941 MB)
 hf download ThorOdinson246/nl2sh-1.5b-Q4_K_M nl2sh-1.5b-Q4_K_M.gguf --local-dir .
