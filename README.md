@@ -3,6 +3,8 @@
 Ask for a shell command in plain English. Runs on your own machine, on CPU.
 No GPU, no API key, no network. Answers in about a second.
 
+![whatisit in use](whatisit.gif)
+
 ```console
 $ whatisit find files bigger than 100MB in this folder
 find . -size +100M -exec ls -lh {} \;
@@ -96,7 +98,8 @@ whatisit list files changed in the last week
 | `-t`, `--timing` | report how long generation took |
 
 Nothing runs unless you pass `-e` and confirm at the prompt. Anything flagged
-`DANGER` is never auto-run at all.
+`DANGER` is never auto-run at all. See [Safety](#safety) for what gets flagged
+and what the checker can't see.
 
 ```bash
 # use the result inline
