@@ -3,16 +3,18 @@
 Ask for a shell command in plain English. Runs on your own machine, on CPU.
 No GPU, no API key, no network. Answers in about a second.
 
+![whatisit in use](whatisit.gif)
+
 ```console
-$ whatisit find files bigger than 100MB in this folder
-find . -size +100M -exec ls -lh {} \;
+$ whatisit find files bigger than 100mb in this folder
+find . -size +100M
 
 $ whatisit compress the logs directory into a tarball
-tar -czf logs.tar.gz logs/
+tar -czvf logs.tar.gz logs/
 
-$ whatisit delete everything in the root directory
-  !! DANGER  recursive force-delete of a critical path
-rm -rf /
+$ whatisit discard all uncommitted changes
+git reset --hard
+  !! DANGER  git reset --hard discards uncommitted work
 ```
 
 The model is 941 MB and runs through `llama.cpp`. Nothing you type leaves the
@@ -96,7 +98,8 @@ whatisit list files changed in the last week
 | `-t`, `--timing` | report how long generation took |
 
 Nothing runs unless you pass `-e` and confirm at the prompt. Anything flagged
-`DANGER` is never auto-run at all.
+`DANGER` is never auto-run at all. See [Safety](#safety) for what gets flagged
+and what the checker can't see.
 
 ```bash
 # use the result inline
