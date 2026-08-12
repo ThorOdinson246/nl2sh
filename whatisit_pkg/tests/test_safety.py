@@ -82,6 +82,8 @@ MUST_FLAG_DANGER = [
     "rsync -a --delete ./empty/ /etc/",
     # --- third round: bypasses a second independent adversarial audit found.
     "rm -rf $'/'",                        # shlex doesn't decode bash's $'...' ANSI-C quoting
+    r"rm -rf $'\057'",                    # Bash octal escape for '/'
+    r"rm -rf $'\x2f'",                    # Bash hexadecimal escape for '/'
     "sudo -u root rm -rf /",              # wrapper's OWN option, not just its name, was left unstripped
     "sudo -E rm -rf /",
     "env -i rm -rf /",

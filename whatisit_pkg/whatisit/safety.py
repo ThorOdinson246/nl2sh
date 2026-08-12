@@ -120,8 +120,8 @@ def _strip_control(s: str) -> str:
 
 
 ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
-_ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'",
-                   "0": "\0", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+_ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"',
+                   "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v"}
 
 
 def _decode_ansi_c(segment: str) -> str:
@@ -138,7 +138,38 @@ def _decode_ansi_c(segment: str) -> str:
         while i < len(body):
             c = body[i]
             if c == "\\" and i + 1 < len(body):
-                out.append(_ANSI_C_ESCAPES.get(body[i + 1], body[i + 1]))
+                esc = body[i + 1]
+                if esc in _ANSI_C_ESCAPES:
+                    out.append(_ANSI_C_ESCAPES[esc])
+                    i += 2
+                    continue
+                if esc in "01234567":
+                    end = i + 2
+                    while end < len(body) and end < i + 4 and body[end] in "01234567":
+                        end += 1
+                    out.append(chr(int(body[i + 1:end], 8)))
+                    i = end
+                    continue
+                widths = {"x": 2, "u": 4, "U": 8}
+                if esc in widths:
+                    end = i + 2
+                    limit = min(len(body), end + widths[esc])
+                    while end < limit and body[end] in "0123456789abcdefABCDEF":
+                        end += 1
+                    if end > i + 2:
+                        value = int(body[i + 2:end], 16)
+                        if value <= 0x10FFFF:
+                            out.append(chr(value))
+                            i = end
+                            continue
+                if esc == "c" and i + 2 < len(body):
+                    out.append(chr(ord(body[i + 2].upper()) & 0x1F))
+                    i += 3
+                    continue
+                # Bash leaves an unrecognized escape's backslash intact. Doing
+                # the same also avoids normalizing an unknown spelling into a
+                # different, potentially less suspicious target.
+                out.append("\\" + esc)
                 i += 2
             else:
                 out.append(c)
