@@ -71,3 +71,6 @@ campaign/
 # Local-only git helpers. Referenced by nothing that ships.
 .gitmessage
 hooks/
+
+# pip build
+whatisit_pkg/build/

@@ -168,6 +168,10 @@ def cmd_query(args, cfg: dict) -> int:
     if not args.execute:
         return 0
 
+    if os.name == 'nt':
+        print("warning: --execute is disabled on windows for safety reasons (no classifier)")
+        return 7
+
     # ---- execution path ----
     # With several candidates on screen, do NOT assume #1. The numbering only
     # ranks confidence, and #1 is the greedy answer rather than a verified one;
