@@ -314,6 +314,26 @@ class TestGenerateDiscardsTruncatedCandidates:
         cmds, _, _ = engine.generate("list files", {}, n=2)
         assert cmds == ["ls -la"]
 
+    @pytest.mark.parametrize("kwargs", [{"quiet": True}, {"for_execution": True}])
+    def test_execution_paths_suppress_volatile_host_context(
+            self, monkeypatch, tmp_path, kwargs):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        captured = {}
+
+        class CaptureHostCtx:
+            @staticmethod
+            def build(prompt, enabled=True, cwd=None, include_volatile=True):
+                captured["include_volatile"] = include_volatile
+                return ("SYSTEM PROMPT", prompt)
+
+        monkeypatch.setattr(engine, "hostctx", CaptureHostCtx())
+        monkeypatch.setattr(
+            engine, "_query_server",
+            lambda port, prompt, cfg, n, system=None: [("ls -la", "stop")])
+
+        engine.generate("list files", {}, **kwargs)
+        assert captured["include_volatile"] is False
+
     def test_no_model_raises_file_not_found(self, monkeypatch):
         monkeypatch.setattr(cfg_mod, "find_model", lambda: None)
         with pytest.raises(FileNotFoundError):
@@ -322,5 +342,5 @@ class TestGenerateDiscardsTruncatedCandidates:
 
 class _FakeHostCtx:
     @staticmethod
-    def build(prompt, enabled=True, cwd=None):
+    def build(prompt, enabled=True, cwd=None, include_volatile=True):
         return ("SYSTEM PROMPT", prompt)

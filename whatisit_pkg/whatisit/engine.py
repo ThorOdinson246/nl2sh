@@ -489,7 +489,7 @@ def looks_degenerate(cmd: str, min_repeats: int = 4) -> bool:
 
 
 def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
-             quiet: bool = False) -> tuple[list[str], float, str]:
+             quiet: bool = False, for_execution: bool = False) -> tuple[list[str], float, str]:
     """Return (commands, elapsed_seconds, mode). Commands are already extracted."""
     model = cfg_mod.find_model()
     if model is None:
@@ -509,7 +509,9 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
     # Host context defaults ON: it is prefix-cached, so it costs one-time
     # prefill rather than per-query latency, and it removed a whole class of
     # placeholder / wrong-tool failures. cfg["host_context"]=false disables it.
-    system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+    system, user_msg = hostctx.build(
+        prompt, enabled=cfg.get("host_context", True),
+        include_volatile=not (for_execution or quiet))
 
     t0 = time.time()
     if server_bin is not None:
