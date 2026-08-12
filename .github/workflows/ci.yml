@@ -18,6 +18,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    defaults:
+      run:
+        # Windows runners default to pwsh, where `> /dev/null` is a path.
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +31,12 @@ jobs:
           # The README claims macOS support; prove it on the current version.
           - os: macos-latest
             python-version: "3.12"
+          # Windows is unsupported but installable; the bar is "no traceback".
+          # 3.9 catches POSIX-only calls that 3.13 has since gained.
+          - os: windows-latest
+            python-version: "3.9"
+          - os: windows-latest
+            python-version: "3.13"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
