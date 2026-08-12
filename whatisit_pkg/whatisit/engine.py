@@ -19,6 +19,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -196,18 +197,75 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _alive(port: int | None = None, timeout: float = 0.6) -> bool:
+def _pid_owns_tcp_port(pid: int, port: int) -> bool:
+    """Confirm that ``pid`` owns the listening socket before sending the token.
+
+    TCP fallback cannot hold the port open while llama-server binds it. A local
+    process can therefore win that race, but it must never receive our API key
+    or be accepted as the model server. Linux exposes socket ownership through
+    /proc; macOS and other POSIX hosts use lsof when it is available.
+    """
+    proc_fd = Path(f"/proc/{pid}/fd")
+    if proc_fd.is_dir():
+        try:
+            inodes = set()
+            for fd in proc_fd.iterdir():
+                try:
+                    target = os.readlink(str(fd))
+                except OSError:  # an fd can close while /proc is being walked
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+            for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+                try:
+                    lines = table.read_text().splitlines()[1:]
+                except OSError:
+                    continue
+                for line in lines:
+                    fields = line.split()
+                    if len(fields) < 10 or fields[3] != "0A" or fields[9] not in inodes:
+                        continue
+                    if int(fields[1].rsplit(":", 1)[1], 16) == port:
+                        return True
+            return False
+        except OSError:
+            pass
+
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return False
+    try:
+        p = subprocess.run(
+            [lsof, "-nP", "-a", "-p", str(pid), f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+            capture_output=True, text=True, timeout=1.0)
+        return p.returncode == 0 and f"p{pid}" in p.stdout.splitlines()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _alive(port: int | None = None, timeout: float = 0.6,
+           expected_pid: int | None = None) -> bool:
     sp = _state_dir() / "server.sock"
     if sp.exists():
         try:
-            _request("/health", timeout=timeout)
+            # /health is deliberately public in llama-server. Probe an
+            # authenticated endpoint so a stale endpoint cannot count as ours.
+            _request("/v1/models", timeout=timeout)
             return True
         except Exception:
             return False
     if port is None:
         return False
+    if expected_pid is None or not _pid_owns_tcp_port(expected_pid, port):
+        return False
+    token = _read_token()
+    if not token:
+        return False
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{port}/health", timeout=timeout) as r:
+        req = urllib.request.Request(
+            f"http://{HOST}:{port}/v1/models",
+            headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status == 200
     except Exception:
         return False
@@ -219,9 +277,10 @@ def running_port() -> int | None:
         return None
     try:
         port = int(p.read_text().strip())
-    except ValueError:
+        pid = int((_state_dir() / "server.pid").read_text().strip())
+    except (OSError, ValueError):
         return None
-    return port if _alive(port) else None
+    return port if _is_our_server(pid) and _alive(port, expected_pid=pid) else None
 
 
 def _is_our_server(pid: int) -> bool:
@@ -235,7 +294,16 @@ def _is_our_server(pid: int) -> bool:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
         cmdline = raw.replace(b"\x00", b" ").decode(errors="replace")
     except OSError:
-        return False
+        # macOS has no /proc. ps is used only to inspect one already-known pid;
+        # argument vectors are still passed without a shell.
+        try:
+            p = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                               capture_output=True, text=True, timeout=1.0)
+            if p.returncode != 0:
+                return False
+            cmdline = p.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     return "llama-server" in cmdline
 
 
@@ -259,8 +327,10 @@ def stop_server() -> bool:
 
 def start_server(model: Path, server_bin: Path, threads: int,
                  wait: float = 180.0, quiet: bool = False) -> int:
-    if _alive(running_port()):
-        return running_port() or 0
+    if _sock_path().exists() and _alive():
+        return 0
+    if (existing := running_port()) is not None:
+        return existing
     sd = _state_dir()
     log = sd / "server.log"
 
@@ -279,19 +349,30 @@ def start_server(model: Path, server_bin: Path, threads: int,
         sp.unlink(missing_ok=True)
         port = 0
         cmd = [str(server_bin), "-m", str(model), "--host", str(sp),
-               "-t", str(threads), "-c", "2048", "--no-webui", "--api-key", token]
+               "-t", str(threads), "-c", "2048", "--no-webui"]
     else:
         port = _free_port()
         cmd = [str(server_bin), "-m", str(model), "--host", HOST, "--port", str(port),
-               "-t", str(threads), "-c", "2048", "--no-webui", "--api-key", token]
+               "-t", str(threads), "-c", "2048", "--no-webui"]
     # The server log records the launch command line and can contain prompt
     # text; it gets the same owner-only treatment as the pid and token.
-    if not log.exists():
-        os.close(os.open(str(log), os.O_WRONLY | os.O_CREAT, 0o600))
-    with open(log, "ab") as lf:
+    log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if os.name != "nt":
+        log_flags |= os.O_NOFOLLOW
+    log_fd = os.open(str(log), log_flags, 0o600)
+    try:
+        os.fchmod(log_fd, 0o600)
+    except (OSError, AttributeError):
+        pass
+    launch_env = _runtime_env()
+    # llama-server documents LLAMA_API_KEY as the environment equivalent of
+    # --api-key. Keeping the secret out of argv also keeps it out of ps output
+    # and out of the launch command recorded below.
+    launch_env["LLAMA_API_KEY"] = token
+    with os.fdopen(log_fd, "ab") as lf:
         lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(cmd)}\n".encode())
         proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
-                                env=_runtime_env(), start_new_session=True)
+                                env=launch_env, start_new_session=True)
     _write_private(sd / "server.pid", str(proc.pid))
     if port:
         _write_private(_port_file(), str(port))
@@ -303,7 +384,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"llama-server exited rc={proc.returncode}; see {log}")
-        if _alive(port or None):
+        if _alive(port or None, expected_pid=proc.pid if port else None):
             if not quiet:
                 print(" ready.", file=sys.stderr, flush=True)
             return port

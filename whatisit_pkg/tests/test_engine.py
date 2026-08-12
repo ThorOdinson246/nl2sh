@@ -6,6 +6,7 @@ monkeypatched, and "model" paths are just empty tmp_path files that only need
 to exist.
 """
 import os
+import socket
 import stat
 import sys
 
@@ -120,6 +121,94 @@ class TestWritePrivate:
             pass  # ELOOP is the expected, safe outcome
         # Either way, the symlink target must be untouched.
         assert target.read_text() == "do not touch me"
+
+
+# --------------------------------------------------------- TCP authentication
+
+class TestTcpServerIdentity:
+    @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX socket inspection")
+    def test_current_process_owns_its_listening_port(self):
+        with socket.socket() as listener:
+            listener.bind((engine.HOST, 0))
+            listener.listen()
+            assert engine._pid_owns_tcp_port(os.getpid(), listener.getsockname()[1]) is True
+
+    def test_alive_does_not_send_token_to_wrong_pid(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: False)
+        monkeypatch.setattr(
+            engine.urllib.request, "urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("network request attempted")))
+        assert engine._alive(43210, expected_pid=1234) is False
+
+    def test_alive_authenticates_after_owner_check(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_open(req, timeout):
+            captured["authorization"] = req.get_header("Authorization")
+            return Response()
+
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        monkeypatch.setattr(engine.urllib.request, "urlopen", fake_open)
+        assert engine._alive(43210, expected_pid=1234) is True
+        assert captured["authorization"] == "Bearer secret-token"
+
+    def test_start_server_keeps_token_out_of_argv_and_log(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.gguf"
+        server = tmp_path / "llama-server"
+        model.write_bytes(b"model")
+        server.write_bytes(b"binary")
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("WHATISIT_FORCE_TCP", "1")
+        monkeypatch.setattr(engine, "running_port", lambda: None)
+        monkeypatch.setattr(engine, "_free_port", lambda: 43210)
+        monkeypatch.setattr(engine, "_alive", lambda port=None, timeout=0.6, expected_pid=None:
+                            expected_pid == 2468)
+        captured = {}
+
+        class Process:
+            pid = 2468
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return None
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs["env"]
+            return Process()
+
+        monkeypatch.setattr(engine.subprocess, "Popen", fake_popen)
+        assert engine.start_server(model, server, threads=2, wait=1, quiet=True) == 43210
+
+        token = captured["env"]["LLAMA_API_KEY"]
+        assert token
+        assert token not in captured["cmd"]
+        assert "--api-key" not in captured["cmd"]
+        assert token not in (tmp_path / "data" / "run" / "server.log").read_text()
+
+    def test_start_server_reuses_authenticated_unix_socket(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        sock = tmp_path / "data" / "run" / "server.sock"
+        sock.parent.mkdir(parents=True)
+        sock.touch()
+        monkeypatch.setattr(engine, "_alive", lambda *a, **k: True)
+        monkeypatch.setattr(
+            engine.subprocess, "Popen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("server restarted")))
+        assert engine.start_server(tmp_path / "model", tmp_path / "server", threads=1) == 0
 
 
 # ------------------------------------------------------ greedy-first ordering
