@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from . import config as cfg_mod
-from . import engine, fetch
+from . import engine, fetch, lms_backend
 from .safety import check
 
 # Colour only when attached to a terminal, and honour NO_COLOR.
@@ -163,7 +163,12 @@ def cmd_query(args, cfg: dict) -> int:
         _log_query(prompt, cmds, elapsed, mode)
 
     if args.timing:
-        print(DIM(f"  [{elapsed:.2f}s, {mode} mode]"), file=sys.stderr)
+        mode_label = {
+            "server": "llama-server",
+            "oneshot": "llama-cli",
+            "lms": "LM Studio (lms)",
+        }.get(mode, mode)
+        print(DIM(f"  [{elapsed:.2f}s, {mode_label}]"), file=sys.stderr)
 
     if not args.execute:
         return 0
@@ -231,6 +236,125 @@ def _confirm(prompt: str, auto: bool) -> bool:
         return False
 
 
+def _llama_present() -> bool:
+    """True when a llama-server or llama-cli binary is already available."""
+    if cfg_mod.find_llama_cli() is not None:
+        return True
+    sb = cfg_mod.env("LLAMA_SERVER")
+    if sb and Path(sb).exists():
+        return True
+    if (cfg_mod.data_dir() / "bin" / "llama-server").exists():
+        return True
+    if shutil.which("llama-server"):
+        return True
+    return False
+
+
+def _prompt_choice(prompt: str, choices: dict[str, str], default: str) -> str:
+    """Interactive single-letter (or key) choice. choices: key -> label."""
+    keys = list(choices)
+    hint = "/".join(f"{k}={choices[k]}" for k in keys)
+    while True:
+        try:
+            ans = input(f"  {prompt} [{hint}] (default {default}): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+        if not ans:
+            return default
+        if ans in choices:
+            return ans
+        # also accept unique label prefixes
+        matches = [k for k, lab in choices.items() if lab.startswith(ans) or k == ans]
+        if len(matches) == 1:
+            return matches[0]
+        print(f"  choose one of: {', '.join(keys)}")
+
+
+def _set_backend_llama(cfg: dict) -> None:
+    cfg["backend_primary"] = "llama"
+    cfg.pop("backend_fallback", None)  # legacy key; single backend only
+    cfg.pop("lms_path", None)
+    cfg.pop("lms_model", None)
+
+
+def _set_backend_lms(cfg: dict, lms: Path) -> None:
+    cfg["backend_primary"] = "lms"
+    cfg.pop("backend_fallback", None)  # legacy key; single backend only
+    cfg["lms_path"] = str(lms)
+
+
+def _configure_backends(args, cfg: dict) -> tuple[str | None, bool]:
+    """Pick exactly one backend: llama.cpp or LM Studio (lms).
+
+    Returns (selected_primary, need_llama_assets).
+    need_llama_assets is False when the user chose lms (skip llama download).
+    """
+    has_llama = _llama_present()
+    lms = lms_backend.find_lms()
+    has_lms = lms is not None
+    auto = bool(getattr(args, "auto", False))
+
+    if not has_llama and not has_lms:
+        # Existing install path will fetch llama.cpp.
+        _set_backend_llama(cfg)
+        return "llama", True
+
+    if has_llama and not has_lms:
+        _set_backend_llama(cfg)
+        print(f"  backend: {GREEN('llama')} (llama.cpp; LM Studio CLI not on PATH)")
+        return "llama", True
+
+    if has_lms and not has_llama:
+        _set_backend_lms(cfg, lms)
+        print(f"  backend: {GREEN('lms')} (LM Studio CLI)  {lms}")
+        return "lms", False
+
+    # Both present: one choice only (no dual-backend / fallback).
+    if auto or not sys.stdin.isatty():
+        _set_backend_llama(cfg)
+        why = "--auto" if auto else "no TTY"
+        print(f"  backend: {GREEN('llama')} (llama.cpp; both installed, {why}; "
+              f"re-run setup interactively or "
+              f"`whatisit config --set backend_primary=lms`)")
+        return "llama", True
+
+    print(f"  found llama.cpp runtime and LM Studio CLI ({lms})")
+    which = _prompt_choice(
+        "use which backend? (one only)",
+        {"l": "llama.cpp", "m": "LM-Studio"},
+        "l",
+    )
+    if which == "m":
+        _set_backend_lms(cfg, lms)
+        print(f"  backend: {GREEN('lms')} (LM Studio CLI)  {lms}")
+        return "lms", False
+    _set_backend_llama(cfg)
+    print(f"  backend: {GREEN('llama')} (llama.cpp)")
+    return "llama", True
+
+
+def _setup_lms_model(cfg: dict) -> int:
+    """Ensure an nl2sh model is visible to lms. 0 ok, 1 fail with instructions."""
+    try:
+        lms = lms_backend.lms_path(cfg)
+        keys = lms_backend.nl2sh_keys(lms_backend.list_models(lms))
+    except lms_backend.LmsError as e:
+        print(f"  {RED('lms')}: {e}", file=sys.stderr)
+        return 1
+    if len(keys) == 1:
+        print(f"  lms model: {keys[0]}")
+        return 0
+    if len(keys) > 1:
+        print(f"  {YELLOW('multiple nl2sh models')}: {', '.join(keys)}")
+        print("  pin one:  whatisit config --set lms_model=<key>")
+        # Still usable once pinned; do not fail setup hard if user will pin.
+        return 0
+    print(f"  {RED('no nl2sh model')} in LM Studio")
+    print(f"  {lms_backend.model_get_instructions()}")
+    return 1
+
+
 def _progress(got: int, total: int) -> None:
     if not total:
         return
@@ -283,10 +407,20 @@ def cmd_setup(args, cfg: dict) -> int:
     models_dir = cfg_mod.data_dir() / "models"
     bin_dir = cfg_mod.data_dir() / "bin"
 
+    primary, need_llama = _configure_backends(args, cfg)
+    if primary == "lms":
+        if _setup_lms_model(cfg) != 0:
+            return 1
+
     # An explicit path means the manual path, which is unchanged. Otherwise
     # bare `setup` fetches what is missing.
     if not (args.model or args.bin_dir):
+        if not need_llama and primary == "lms":
+            return _finish_setup(cfg)
         return _setup_auto(args, cfg, models_dir, bin_dir)
+
+    if not need_llama and primary == "lms" and not (args.model or args.bin_dir):
+        return _finish_setup(cfg)
 
     models_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -318,7 +452,7 @@ def cmd_setup(args, cfg: dict) -> int:
         else:
             target.symlink_to(src)
             print(f"  linked model: {target} -> {src}")
-    else:
+    elif need_llama:
         print(f"  {YELLOW('no model yet.')} Provide one with:")
         print(f"    whatisit setup --model /path/to/{cfg_mod.MODEL_NAME}")
         print(DIM("  (a released build would download it from the model hub here)"))
@@ -362,7 +496,7 @@ def _setup_auto(args, cfg: dict, models_dir: Path, bin_dir: Path) -> int:
         print(f"  model present: {model_file.name} "
               f"({model_file.stat().st_size / 1e6:.0f} MB)")
     if want_runtime and not need_runtime:
-        print(f"  runtime present: {server}")
+        print(f"  llama.cpp runtime present: {server}")
 
     plan = {"kind": "none", "reason": "", "warn": "", "url": None,
             "sha256": None, "size": 0}
@@ -476,7 +610,7 @@ def _fetch_runtime(args, plan: dict, bin_dir: Path) -> None:
             dest.unlink()
         shutil.move(str(item), str(dest))
     shutil.rmtree(staging / "unpacked", ignore_errors=True)
-    print(f"  runtime installed: {bin_dir}")
+    print(f"  llama.cpp runtime installed: {bin_dir}")
 
 
 def _fetch_model(args, spec: dict, model_file: Path, slot: Path) -> None:
@@ -496,9 +630,40 @@ def _fetch_model(args, spec: dict, model_file: Path, slot: Path) -> None:
         print(f"  registered: {slot.name} -> {model_file.name}")
 
 
+def _doctor_row(kind: str, field: str, detail: str) -> None:
+    """One aligned doctor line: status (4) | field (12) | detail.
+
+    Colour is applied after padding so ANSI codes do not shift columns.
+    """
+    plain = f"{kind:<4}"[:4] if len(kind) >= 4 else f"{kind:<4}"
+    if kind == "ok":
+        status = GREEN(plain)
+    elif kind == "FAIL":
+        status = RED(plain)
+    elif kind == "warn":
+        status = YELLOW(plain)
+    elif kind == "skip":
+        status = DIM(plain)
+    else:
+        status = plain  # info / idle
+    print(f"  {status}  {field:<12}  {detail}")
+
+
 def cmd_doctor(args, cfg: dict) -> int:
     print(BOLD("whatisit doctor"))
     ok = True
+
+    primary = cfg.get("backend_primary")
+    if primary == "llama":
+        _doctor_row("info", "backend", "llama  (llama.cpp)")
+    elif primary == "lms":
+        _doctor_row("info", "backend", "lms  (LM Studio CLI)")
+    else:
+        _doctor_row("info", "backend",
+                    "legacy auto (llama-server/cli; LM Studio not used until setup)")
+
+    uses_llama = (not primary) or primary == "llama"
+    uses_lms = primary == "lms"
 
     model = cfg_mod.find_model()
     if model:
@@ -507,31 +672,93 @@ def cmd_doctor(args, cfg: dict) -> int:
         # otherwise doctor names the wrong model.
         actual = model.resolve().name if model.is_symlink() else model.name
         suffix = f"  [{actual}]" if actual != model.name else ""
-        print(f"  {GREEN('ok')}    model      {model} "
-              f"({model.stat().st_size / 1e6:.0f} MB){suffix}")
-    else:
-        print(f"  {RED('FAIL')}  model      not found -- run `whatisit setup --model ...`")
+        _doctor_row("ok", "llama model",
+                    f"{model} ({model.stat().st_size / 1e6:.0f} MB){suffix}")
+    elif uses_llama:
+        _doctor_row("FAIL", "llama model",
+                    "not found -- run `whatisit setup --model ...`")
         ok = False
+    else:
+        _doctor_row("skip", "llama model", "model file path not required for lms-only")
 
     srv = cfg_mod.env("LLAMA_SERVER") or str(cfg_mod.data_dir() / "bin" / "llama-server")
     if Path(srv).exists():
-        print(f"  {GREEN('ok')}    server     {srv}")
+        _doctor_row("ok", "llama-server", str(srv))
+    elif uses_llama:
+        _doctor_row("warn", "llama-server",
+                    "not found -- falling back to llama-cli one-shot mode")
     else:
-        print(f"  {YELLOW('warn')}  server     not found -- falling back to slow one-shot mode")
+        _doctor_row("skip", "llama-server", "not needed for lms-only")
 
-    cli = cfg_mod.find_llama_cli()
-    print(f"  {GREEN('ok') if cli else RED('FAIL')}    cli        {cli or 'not found'}")
-    ok = ok and bool(cli or Path(srv).exists())
+    cli_bin = cfg_mod.find_llama_cli()
+    if uses_llama:
+        if cli_bin:
+            _doctor_row("ok", "llama-cli", str(cli_bin))
+        else:
+            _doctor_row("FAIL", "llama-cli", "not found")
+        ok = ok and bool(cli_bin or Path(srv).exists())
+    else:
+        _doctor_row("skip", "llama-cli", "not needed for lms-only")
+
+    lms_key = None
+    lms_loaded = False
+    if uses_lms or cfg.get("lms_path"):
+        lp = cfg.get("lms_path")
+        if lp and Path(lp).is_file():
+            _doctor_row("ok", "lms", str(lp))
+            try:
+                lms_key = lms_backend.resolve_model_key(cfg, Path(lp))
+                lms_loaded = lms_backend.is_loaded(Path(lp), lms_key)
+                _doctor_row("ok", "lms model", lms_key)
+            except lms_backend.LmsError as e:
+                _doctor_row("FAIL", "lms model", str(e))
+                if uses_lms:
+                    ok = False
+        else:
+            _doctor_row("FAIL", "lms",
+                        f"{lp or 'lms_path not set'} -- re-run setup")
+            if uses_lms:
+                ok = False
+    else:
+        found = lms_backend.find_lms()
+        if found:
+            _doctor_row("info", "lms",
+                        f"on PATH ({found}); not configured (run setup to enable)")
 
     bundled = Path(__file__).resolve().parent.parent.parent / "runtime" / "lib"
-    print(f"  {'ok' if bundled.is_dir() else 'warn'}    libs       "
-          f"{bundled if bundled.is_dir() else 'using system libstdc++'}")
+    if bundled.is_dir():
+        _doctor_row("ok", "libs", str(bundled))
+    else:
+        _doctor_row("warn", "libs", "using system libstdc++")
 
-    port = engine.running_port()
-    where = f"listening on {port}" if port else "not running"
-    print(f"  {'ok' if port else 'idle'}  server pid {where}")
-    print(f"  info  threads    {cfg_mod.resolve_threads(cfg)} (of {os.cpu_count()} cores)")
-    print(f"  info  config     {cfg_mod.config_path()}")
+    # Only probe the configured backend. For lms this is "model in memory"
+    # via `lms ps` -- not `lms server status` (the optional HTTP API server).
+    if uses_lms:
+        if lms_key and lms_loaded:
+            _doctor_row("ok", "lms load",
+                        f"model loaded in memory ({lms_key})")
+        elif lms_key:
+            _doctor_row("idle", "lms load",
+                        f"model not loaded in memory ({lms_key})")
+        else:
+            _doctor_row("idle", "lms load", "model not loaded in memory")
+    else:
+        # llama backend (or legacy auto): whatisit's own llama-server only.
+        port = engine.running_port()
+        if port:
+            _doctor_row("ok", "llama run", f"llama-server running (port {port})")
+        else:
+            _doctor_row("idle", "llama run", "llama-server not running")
+
+    nthreads = cfg_mod.resolve_threads(cfg)
+    ncores = os.cpu_count()
+    if uses_lms:
+        _doctor_row("info", "threads",
+                    f"{nthreads} (of {ncores} cores; llama.cpp setting, unused with lms)")
+    else:
+        _doctor_row("info", "threads",
+                    f"{nthreads} (of {ncores} cores; llama.cpp decode)")
+    _doctor_row("info", "config", str(cfg_mod.config_path()))
 
     # Both directories present means the one-time move was skipped rather than
     # run: it never overwrites. Only worth saying here, where someone is
@@ -540,14 +767,28 @@ def cmd_doctor(args, cfg: dict) -> int:
         legacy = cfg_mod.legacy_dir(kind)
         current = cfg_mod.config_dir() if kind == "config" else cfg_mod.data_dir()
         if legacy.is_dir() and current.is_dir():
-            print(f"  {YELLOW('warn')}  {kind:<10} {legacy} also exists and is unused; "
-                  f"{current} is the live one")
+            _doctor_row("warn", kind,
+                        f"{legacy} also exists and is unused; {current} is the live one")
     print(f"\n{GREEN('All good.') if ok else RED('Not ready.')}")
     return 0 if ok else 1
 
 
 def cmd_stop(args, cfg: dict) -> int:
-    print("whatisit: server stopped." if engine.stop_server() else "whatisit: no server running.")
+    stopped = engine.stop_server()
+    if stopped:
+        print("whatisit: llama-server stopped.")
+    else:
+        print("whatisit: llama-server was not running.")
+    if cfg.get("lms_path"):
+        try:
+            if lms_backend.unload_nl2sh(cfg):
+                print("whatisit: LM Studio (lms): unloaded nl2sh model "
+                      "(LM Studio app left running).")
+            else:
+                print("whatisit: LM Studio (lms): nl2sh model was not loaded.")
+        except lms_backend.LmsError as e:
+            print(f"whatisit: LM Studio (lms) unload failed: {e}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -592,11 +833,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="print only the bare command, for $(...) use")
     ap.add_argument("-t", "--timing", action="store_true", help="report latency")
     ap.add_argument("--oneshot", action="store_true",
-                    help="bypass the resident server (slower; for debugging)")
+                    help="bypass llama-server; use llama-cli one-shot (slower; debug)")
 
     sub = ap.add_subparsers(dest="sub")
-    s = sub.add_parser("setup", help="first-run setup: fetch the runtime and model")
-    s.add_argument("--model", help="path to a GGUF model you already have")
+    s = sub.add_parser("setup", help="first-run setup: llama.cpp and/or LM Studio (lms)")
+    s.add_argument("--model", help="path to a GGUF model you already have (llama.cpp)")
     s.add_argument("--bin-dir", help="directory containing llama-server / llama-cli")
     s.add_argument("--copy", action="store_true", help="copy the model instead of symlinking")
     s.add_argument("--auto", action="store_true",
@@ -614,7 +855,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_setup)
 
     sub.add_parser("doctor", help="check the installation").set_defaults(func=cmd_doctor)
-    sub.add_parser("stop", help="stop the resident model server").set_defaults(func=cmd_stop)
+    sub.add_parser(
+        "stop",
+        help="stop llama-server and/or unload the nl2sh model in LM Studio",
+    ).set_defaults(func=cmd_stop)
     c = sub.add_parser("config", help="show or change settings")
     c.add_argument("--set", nargs="+", metavar="K=V")
     c.set_defaults(func=cmd_config)

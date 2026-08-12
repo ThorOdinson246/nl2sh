@@ -29,6 +29,7 @@ from pathlib import Path
 
 from . import config as cfg_mod
 from . import hostctx
+from . import lms_backend
 from .extract import extract
 
 HOST = "127.0.0.1"
@@ -297,7 +298,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
         _write_private(_port_file(), str(port))
 
     if not quiet:
-        print("whatisit: loading model into memory (first run only)...",
+        print("whatisit: starting llama-server (loading model, first run only)...",
               file=sys.stderr, end="", flush=True)
     deadline = time.time() + wait
     while time.time() < deadline:
@@ -360,7 +361,8 @@ def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: 
            "-st", "--no-display-prompt", "--no-warmup",
            "--temp", str(cfg.get("temperature", 0.0)),
            "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads)]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=_runtime_env(), timeout=300)
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=_runtime_env(), timeout=300)
     if p.returncode != 0:
         raise RuntimeError(f"llama-cli rc={p.returncode}: {p.stderr[-400:]}")
     # one-shot mode gives no finish_reason; treat as unknown
@@ -407,42 +409,44 @@ def looks_degenerate(cmd: str, min_repeats: int = 4) -> bool:
     return bool(counts) and counts.most_common(1)[0][1] >= min_repeats
 
 
-def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
-             quiet: bool = False) -> tuple[list[str], float, str]:
-    """Return (commands, elapsed_seconds, mode). Commands are already extracted."""
+def _find_server_bin(cfg: dict) -> Path | None:
+    sb = cfg_mod.env("LLAMA_SERVER")
+    if sb and Path(sb).exists():
+        return Path(sb)
+    if (c := cfg_mod.data_dir() / "bin" / "llama-server").exists():
+        return c
+    if (c := Path(cfg.get("llama_server", "/nonexistent"))).exists():
+        return c
+    return None
+
+
+def _query_lms(cfg: dict, user_msg: str, n: int, system: str | None) -> list[tuple[str, str | None]]:
+    """n one-shot lms chat calls. finish_reason is always treated as stop."""
+    out = []
+    for _ in range(max(1, n)):
+        text = lms_backend.chat(cfg, system or cfg_mod.SYSTEM_PROMPT, user_msg)
+        out.append((text, "stop"))
+    return out
+
+
+def _generate_llama(prompt_user: str, cfg: dict, n: int, force_oneshot: bool,
+                    quiet: bool, system: str | None) -> tuple[list[tuple[str, str | None]], str]:
     model = cfg_mod.find_model()
     if model is None:
         raise FileNotFoundError("no model found -- run `whatisit setup`")
     threads = cfg_mod.resolve_threads(cfg)
-
-    server_bin = None
-    if not force_oneshot:
-        sb = cfg_mod.env("LLAMA_SERVER")
-        if sb and Path(sb).exists():
-            server_bin = Path(sb)
-        elif (c := cfg_mod.data_dir() / "bin" / "llama-server").exists():
-            server_bin = c
-        elif (c := Path(cfg.get("llama_server", "/nonexistent"))).exists():
-            server_bin = c
-
-    # Host context defaults ON: it is prefix-cached, so it costs one-time
-    # prefill rather than per-query latency, and it removed a whole class of
-    # placeholder / wrong-tool failures. cfg["host_context"]=false disables it.
-    system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
-
-    t0 = time.time()
+    server_bin = None if force_oneshot else _find_server_bin(cfg)
     if server_bin is not None:
         port = start_server(model, server_bin, threads, quiet=quiet)
-        raws = _query_server(port, user_msg, cfg, n, system=system)
-        mode = "server"
-    else:
-        cli = cfg_mod.find_llama_cli()
-        if cli is None:
-            raise FileNotFoundError(
-                "neither llama-server nor llama-cli found -- run `whatisit doctor`")
-        raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system)
-        mode = "oneshot"
+        return _query_server(port, prompt_user, cfg, n, system=system), "server"
+    cli = cfg_mod.find_llama_cli()
+    if cli is None:
+        raise FileNotFoundError(
+            "neither llama-server nor llama-cli found -- run `whatisit doctor`")
+    return _query_oneshot(model, cli, prompt_user, cfg, threads, system=system), "oneshot"
 
+
+def _finalize_cmds(raws: list[tuple[str, str | None]]) -> list[str]:
     cmds, seen = [], set()
     for raw, finish in raws:
         c = extract(raw)
@@ -457,4 +461,28 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
             continue
         seen.add(c)
         cmds.append(c)
-    return cmds, time.time() - t0, mode
+    return cmds
+
+
+def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
+             quiet: bool = False) -> tuple[list[str], float, str]:
+    """Return (commands, elapsed_seconds, mode). Commands are already extracted."""
+    # Host context defaults ON: it is prefix-cached, so it costs one-time
+    # prefill rather than per-query latency, and it removed a whole class of
+    # placeholder / wrong-tool failures. cfg["host_context"]=false disables it.
+    system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+
+    primary = cfg.get("backend_primary")
+    t0 = time.time()
+
+    # Legacy: no backend_primary => server then oneshot only (never lms).
+    if not primary or primary == "llama":
+        raws, mode = _generate_llama(user_msg, cfg, n, force_oneshot, quiet, system)
+        return _finalize_cmds(raws), time.time() - t0, mode
+
+    if primary == "lms":
+        raws = _query_lms(cfg, user_msg, n, system)
+        return _finalize_cmds(raws), time.time() - t0, "lms"
+
+    raise ValueError(f"unknown backend {primary!r} -- expected 'llama' or 'lms'")
+

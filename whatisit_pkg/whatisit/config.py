@@ -33,6 +33,10 @@ DEFAULTS = {
     # Serve over a TCP port instead of a UNIX socket. Set by `setup` when it
     # installs a runtime whose llama-server cannot bind a socket path.
     "force_tcp": False,
+    # Backend: "llama" | "lms" (exactly one). Absent backend_primary => legacy
+    # server/oneshot only (no lms). Written by `whatisit setup`.
+    # Optional keys omitted from defaults: backend_primary, lms_path, lms_model,
+    # lms_ttl.
 }
 
 
@@ -116,13 +120,15 @@ def save_config(cfg: dict) -> Path:
     # Create with 0600 from the start rather than write-then-chmod: the latter
     # leaves a window where the file sits at the umask default -- group-readable
     # on the shared-NFS-home clusters this targets -- readable by a co-tenant.
-    if os.name == 'nt':
-        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    else:
-        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    # O_NOFOLLOW is POSIX-only; Windows has no equivalent flag on os.open.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if os.name != "nt":
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(p), flags, 0o600)
     # The 0o600 above applies only at CREATION; a pre-existing file keeps
     # whatever mode it had. fchmod on the open fd closes that gap, race-free
-    # because it acts on the fd rather than the path.
+    # because it acts on the fd rather than the path. AttributeError: fchmod
+    # is absent on Windows before Python 3.13.
     try:
         os.fchmod(fd, 0o600)
     except (OSError, AttributeError):
