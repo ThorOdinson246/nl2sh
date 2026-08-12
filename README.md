@@ -24,9 +24,11 @@ cloud API isn't allowed.
 ## Install
 
 ```bash
-pip install whatisit
+pipx install whatisit
 whatisit setup
 ```
+
+`pip install whatisit` works too, inside a virtualenv or on conda.
 
 `setup` works out what your machine needs, tells you the size of each download
 and asks before starting it, then checks the files it fetched. On Linux with a
@@ -42,7 +44,7 @@ Three pieces: the CLI, the model file, and a `llama.cpp` build to run it.
 **1. The CLI.**
 
 ```bash
-pip install whatisit
+pipx install whatisit
 ```
 
 Or from source, if you want to hack on it:
