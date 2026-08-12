@@ -243,6 +243,71 @@ def _pid_owns_tcp_port(pid: int, port: int) -> bool:
         return False
 
 
+def _pid_owns_tcp_connection(pid: int, server_port: int, client_port: int) -> bool:
+    """Confirm that ``pid`` owns this exact established loopback connection."""
+    proc_fd = Path(f"/proc/{pid}/fd")
+    if proc_fd.is_dir():
+        try:
+            inodes = set()
+            for fd in proc_fd.iterdir():
+                try:
+                    target = os.readlink(str(fd))
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+            for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+                try:
+                    lines = table.read_text().splitlines()[1:]
+                except OSError:
+                    continue
+                for line in lines:
+                    fields = line.split()
+                    if len(fields) < 10 or fields[3] != "01" or fields[9] not in inodes:
+                        continue
+                    local_port = int(fields[1].rsplit(":", 1)[1], 16)
+                    remote_port = int(fields[2].rsplit(":", 1)[1], 16)
+                    if local_port == server_port and remote_port == client_port:
+                        return True
+            return False
+        except OSError:
+            pass
+
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return False
+    try:
+        p = subprocess.run(
+            [lsof, "-nP", "-a", "-p", str(pid), f"-iTCP:{server_port}",
+             "-sTCP:ESTABLISHED", "-Fn"],
+            capture_output=True, text=True, timeout=1.0)
+        if p.returncode != 0:
+            return False
+        for line in p.stdout.splitlines():
+            if not line.startswith("n") or "->" not in line:
+                continue
+            local, remote = line[1:].split("->", 1)
+            remote = remote.split(" ", 1)[0]
+            if (local.endswith(f":{server_port}")
+                    and remote.endswith(f":{client_port}")):
+                return True
+        return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _wait_for_tcp_connection_owner(pid: int, server_port: int, client_port: int,
+                                   timeout: float) -> bool:
+    """Wait briefly for the server to accept a just-established connection."""
+    deadline = time.monotonic() + max(timeout, 0)
+    while True:
+        if _pid_owns_tcp_connection(pid, server_port, client_port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+
 def _alive(port: int | None = None, timeout: float = 0.6,
            expected_pid: int | None = None) -> bool:
     sp = _state_dir() / "server.sock"
@@ -261,14 +326,25 @@ def _alive(port: int | None = None, timeout: float = 0.6,
     token = _read_token()
     if not token:
         return False
+    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
     try:
-        req = urllib.request.Request(
-            f"http://{HOST}:{port}/v1/models",
-            headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status == 200
+        # Establish the connection without transmitting HTTP headers, then
+        # prove that its server-side socket belongs to the expected process.
+        # A process taking over the port after the earlier listener check can
+        # therefore never receive the bearer token.
+        conn.connect()
+        if conn.sock is None:
+            return False
+        client_port = conn.sock.getsockname()[1]
+        if not _wait_for_tcp_connection_owner(expected_pid, port, client_port, timeout):
+            return False
+        conn.request("GET", "/v1/models",
+                     headers={"Authorization": f"Bearer {token}"})
+        return conn.getresponse().status == 200
     except Exception:
         return False
+    finally:
+        conn.close()
 
 
 def running_port() -> int | None:

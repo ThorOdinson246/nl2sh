@@ -88,7 +88,7 @@ WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "command",
 WRAPPER_VALUE_OPTS = {
     "sudo": {"-u", "-g", "-h", "-p", "-r", "-t", "-C"},
     "doas": {"-u"},
-    "env": {"-u", "-C", "-S"},
+    "env": {"-u", "-C", "-S", "--split-string"},
     "nice": {"-n"},
     "ionice": {"-c", "-n", "-p", "-t"},
     "stdbuf": {"-i", "-o", "-e"},
@@ -98,6 +98,20 @@ WRAPPER_VALUE_OPTS = {
 # Shells that take a command as a STRING argument -- the string has to be
 # re-checked, or `bash -c "rm -rf /"` hides everything from the tokenizer.
 SHELL_RUNNERS = {"sh", "bash", "zsh", "ksh", "dash", "fish", "ash"}
+
+# Options that consume the following token while a shell is still parsing its
+# own arguments.  They must be skipped when looking for a later `-c`; the first
+# non-option after `-O`/`-o`, for example, is an option value, not a script.
+SHELL_VALUE_OPTS = {
+    "bash": {"-O", "+O", "-o", "+o", "--init-file", "--rcfile"},
+    "sh": {"-o", "+o"},
+    "zsh": {"-o", "+o"},
+    "ksh": {"-o", "+o"},
+    "dash": {"-o", "+o"},
+    "ash": {"-o", "+o"},
+    "fish": {"-C", "--init-command", "-d", "--debug", "--debug-output",
+             "--features", "--profile-startup"},
+}
 
 # Individual files whose destruction breaks the system. The directory list above
 # does not cover them, so `shred -u /etc/passwd` and `unlink /etc/passwd` were
@@ -209,6 +223,20 @@ def _strip_command_prefixes(tokens: list[str]) -> list[str]:
         while toks and toks[0] != "--" and toks[0].startswith("-"):
             opt = toks[0]
             toks = toks[1:]
+            if base == "env":
+                split_value = None
+                if opt in {"-S", "--split-string"} and toks:
+                    split_value, toks = toks[0], toks[1:]
+                elif opt.startswith("-S") and opt != "-S":
+                    split_value = opt[2:]
+                elif opt.startswith("--split-string="):
+                    split_value = opt.split("=", 1)[1]
+                if split_value is not None:
+                    # env inserts these words back into argv before choosing
+                    # the program.  Discarding the value hides the executable
+                    # in `env -S '/bin/bash'` and similar spellings.
+                    toks = _tokenize(split_value) + toks
+                    continue
             if opt in value_opts and toks and not toks[0].startswith("-"):
                 toks = toks[1:]
         if toks and toks[0] == "--":
@@ -697,6 +725,10 @@ PLACEHOLDER_HINT = re.compile(
 
 def _split_top_level(command: str) -> list[tuple[str, str | None]]:
     """Return quote-aware ``(clause, following operator)`` pairs."""
+    # ANSI-C strings use single-quote delimiters but, unlike POSIX single
+    # quotes, allow `\'`.  Decode and safely re-quote them first so an escaped
+    # quote cannot make a later separator appear top-level.
+    command = _decode_ansi_c(command)
     parts: list[tuple[str, str | None]] = []
     current: list[str] = []
     quote: str | None = None
@@ -788,6 +820,33 @@ def _is_code_interpreter(verb: str) -> bool:
             or bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", verb)))
 
 
+def _shell_command_string(verb: str, args: list[str]) -> str | None:
+    """Return the string a supported shell will execute via `-c`, if any."""
+    value_opts = SHELL_VALUE_OPTS.get(verb, set())
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return None
+        if arg in {"-c", "--command"}:
+            return args[i + 1] if i + 1 < len(args) else None
+        if arg.startswith("--command="):
+            return arg.split("=", 1)[1]
+        if arg in value_opts:
+            i += 2
+            continue
+        if any(arg.startswith(opt + "=") for opt in value_opts if opt.startswith("--")):
+            i += 1
+            continue
+        if arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
+            return args[i + 1] if i + 1 < len(args) else None
+        if arg.startswith(("-", "+")):
+            i += 1
+            continue
+        return None
+    return None
+
+
 def check(command: str) -> list[tuple[str, str]]:
     """Return [(severity, reason)]. Empty means nothing flagged.
 
@@ -868,12 +927,8 @@ def check(command: str) -> list[tuple[str, str]]:
         # Shells accept option bundles, so `bash -lc` and `sh -xc` carry the same
         # command-string semantics as a standalone `-c`.
         if verb in SHELL_RUNNERS:
-            for i, t in enumerate(toks[1:], start=1):
-                if t == "--" or not t.startswith("-"):
-                    break
-                if not t.startswith("--") and "c" in t[1:] and i + 1 < len(toks):
-                    findings.extend(check(toks[i + 1]))
-                    break
+            if command_string := _shell_command_string(verb, toks[1:]):
+                findings.extend(check(command_string))
 
         # `eval STRING` is bash's other "run this text as a command" form.
         # Only the single-string case is handled -- `eval $(cmd)` builds the

@@ -133,36 +133,100 @@ class TestTcpServerIdentity:
             listener.listen()
             assert engine._pid_owns_tcp_port(os.getpid(), listener.getsockname()[1]) is True
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX socket inspection")
+    def test_current_process_owns_its_established_connection(self):
+        with socket.socket() as listener, socket.socket() as client:
+            listener.bind((engine.HOST, 0))
+            listener.listen()
+            server_port = listener.getsockname()[1]
+            client.connect((engine.HOST, server_port))
+            accepted, _ = listener.accept()
+            with accepted:
+                assert engine._pid_owns_tcp_connection(
+                    os.getpid(), server_port, client.getsockname()[1]) is True
+
     def test_alive_does_not_send_token_to_wrong_pid(self, monkeypatch, tmp_path):
         monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
         monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: False)
         monkeypatch.setattr(
-            engine.urllib.request, "urlopen",
+            engine.http.client, "HTTPConnection",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("network request attempted")))
         assert engine._alive(43210, expected_pid=1234) is False
 
-    def test_alive_authenticates_after_owner_check(self, monkeypatch, tmp_path):
+    def test_alive_authenticates_after_connection_owner_check(self, monkeypatch, tmp_path):
         monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
-        captured = {}
+        events = []
 
         class Response:
             status = 200
 
-            def __enter__(self):
-                return self
+        class Socket:
+            @staticmethod
+            def getsockname():
+                return (engine.HOST, 54321)
 
-            def __exit__(self, *args):
-                return False
+        class Connection:
+            sock = Socket()
 
-        def fake_open(req, timeout):
-            captured["authorization"] = req.get_header("Authorization")
-            return Response()
+            @staticmethod
+            def connect():
+                events.append("connect")
+
+            @staticmethod
+            def request(method, endpoint, headers):
+                events.append(("request", method, endpoint, headers.get("Authorization")))
+
+            @staticmethod
+            def getresponse():
+                return Response()
+
+            @staticmethod
+            def close():
+                events.append("close")
 
         monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(
+            engine, "_wait_for_tcp_connection_owner",
+            lambda pid, server_port, client_port, timeout: events.append("owner") or True)
         monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
-        monkeypatch.setattr(engine.urllib.request, "urlopen", fake_open)
+        monkeypatch.setattr(engine.http.client, "HTTPConnection", lambda *a, **k: Connection())
         assert engine._alive(43210, expected_pid=1234) is True
-        assert captured["authorization"] == "Bearer secret-token"
+        assert events == [
+            "connect",
+            "owner",
+            ("request", "GET", "/v1/models", "Bearer secret-token"),
+            "close",
+        ]
+
+    def test_alive_never_sends_token_when_connection_owner_differs(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+
+        class Socket:
+            @staticmethod
+            def getsockname():
+                return (engine.HOST, 54321)
+
+        class Connection:
+            sock = Socket()
+
+            @staticmethod
+            def connect():
+                pass
+
+            @staticmethod
+            def request(*args, **kwargs):
+                raise AssertionError("token sent to unverified connection")
+
+            @staticmethod
+            def close():
+                pass
+
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_wait_for_tcp_connection_owner", lambda *args: False)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        monkeypatch.setattr(engine.http.client, "HTTPConnection", lambda *a, **k: Connection())
+        assert engine._alive(43210, expected_pid=1234) is False
 
     def test_start_server_keeps_token_out_of_argv_and_log(self, monkeypatch, tmp_path):
         model = tmp_path / "model.gguf"
