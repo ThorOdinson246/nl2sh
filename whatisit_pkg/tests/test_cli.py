@@ -11,8 +11,6 @@ These cover cases that were REAL bugs found by typing realistic requests:
 None of this starts a server or touches the network: engine.generate is
 monkeypatched wherever cmd_query would otherwise call into it.
 """
-import os
-
 import pytest
 
 from whatisit import cli
@@ -147,7 +145,9 @@ class TestCmdQueryQuietDangerRefusal:
         assert rc == 0  # falls through to help, per main()'s "no words" branch
 
     def test_refuse_execute_in_windows(self, monkeypatch, capsys):
-        monkeypatch.setattr(os, "name", "nt")
+        # Patch the helper, not os.name: setting os.name="nt" on Linux makes
+        # Path.home() (via load_config in main) raise RuntimeError.
+        monkeypatch.setattr(cli, "_is_windows", lambda: True)
         monkeypatch.setattr(
             cli.engine, "generate",
             lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
