@@ -191,12 +191,14 @@ def _git_state(cwd: Path) -> str:
         return ""
     try:
         r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(cwd),
-                           capture_output=True, text=True, timeout=1.5)
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=1.5)
         if r.returncode != 0:
             return ""
         branch = r.stdout.strip()
         s = subprocess.run(["git", "status", "--porcelain"], cwd=str(cwd),
-                           capture_output=True, text=True, timeout=1.5)
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=1.5)
         dirty = "dirty" if s.stdout.strip() else "clean"
         return f"It is a git repo on branch {branch}, working tree {dirty}."
     except (subprocess.TimeoutExpired, OSError):
