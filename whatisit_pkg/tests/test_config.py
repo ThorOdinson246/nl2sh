@@ -7,6 +7,7 @@ may read or write the real ~/.config or ~/.local/share.
 import json
 import os
 import stat
+import sys
 
 import pytest
 
@@ -122,6 +123,8 @@ class TestThreadPolicy:
 
 
 class TestSaveConfigPermissions:
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Unix permission bits are not enforced on Windows")
     def test_config_dir_created_0700(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         cdir = tmp_path / "cfgdir"
@@ -130,6 +133,8 @@ class TestSaveConfigPermissions:
         mode = stat.S_IMODE(cdir.stat().st_mode)
         assert mode == 0o700
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Unix permission bits are not enforced on Windows")
     def test_config_file_created_0600(self, monkeypatch, tmp_path):
         _clear_xdg(monkeypatch)
         cdir = tmp_path / "cfgdir"
@@ -138,6 +143,8 @@ class TestSaveConfigPermissions:
         mode = stat.S_IMODE(p.stat().st_mode)
         assert mode == 0o600
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Unix permission bits are not enforced on Windows")
     def test_pre_existing_loosely_permissioned_file_gets_fixed(self, monkeypatch, tmp_path):
         # fchmod on the open fd must re-tighten a pre-existing file, not just
         # newly-created ones.

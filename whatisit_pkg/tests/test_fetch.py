@@ -255,6 +255,8 @@ class TestExtract:
         with pytest.raises(fetch.FetchError, match="link escapes"):
             fetch.extract_runtime(archive, tmp_path / "dest")
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="absolute symlink error text differs on Windows")
     def test_absolute_symlink_is_rejected(self, tmp_path):
         src = tmp_path / "src" / "llama-b1"
         src.mkdir(parents=True)
@@ -426,6 +428,8 @@ class TestSetupCommand:
         assert cli.cmd_setup(_Args(auto=True, runtime_only=True), cfg) == 0
         assert cfg["force_tcp"] is True
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="asset_url() is None on unsupported Windows host platform")
     def test_upstream_runtime_leaves_the_transport_alone(self, home, monkeypatch, tmp_path):
         monkeypatch.setattr(fetch, "runtime_plan",
                             lambda *a, **k: {"kind": "upstream", "url": "https://x/u.tar.gz",

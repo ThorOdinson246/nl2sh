@@ -7,6 +7,7 @@ to exist.
 """
 import os
 import stat
+import sys
 
 import pytest
 
@@ -82,6 +83,8 @@ class TestStripCliChrome:
 
 # ------------------------------------------------------------- private write
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="os.O_NOFOLLOW is not available on Windows")
 class TestWritePrivate:
     def test_creates_file_with_0600(self, tmp_path):
         p = tmp_path / "server.token"
