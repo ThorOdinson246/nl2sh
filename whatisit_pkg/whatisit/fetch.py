@@ -328,10 +328,13 @@ def _safe_members(tf: tarfile.TarFile, root: Path):
         if not (where + os.sep).startswith(prefix):
             raise FetchError(f"refusing to extract {m.name!r}: escapes the target directory")
         if m.issym() or m.islnk():
-            if os.path.isabs(m.linkname):
+            # POSIX archives use leading '/' for absolute targets; on Windows
+            # os.path.isabs('/etc/shadow') is False, so also catch / and \.
+            ln = m.linkname
+            if os.path.isabs(ln) or ln.startswith(("/", "\\")):
                 raise FetchError(f"refusing to extract {m.name!r}: absolute link target")
             base = os.path.dirname(where) if m.issym() else str(root)
-            dest = os.path.normpath(os.path.join(base, m.linkname))
+            dest = os.path.normpath(os.path.join(base, ln))
             if not (dest + os.sep).startswith(prefix):
                 raise FetchError(f"refusing to extract {m.name!r}: link escapes the target")
         yield m

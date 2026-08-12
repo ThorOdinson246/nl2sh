@@ -69,7 +69,11 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
         # chmod leaves the first line -- a real shell request, which can carry
         # hostnames, paths and secrets -- readable at the umask default
         # (group-readable on a shared NFS home) for the width of that window.
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        # O_NOFOLLOW is POSIX-only; Windows has no equivalent flag on os.open.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if os.name != "nt":
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags, 0o600)
         try:
             os.fchmod(fd, 0o600)   # also covers a pre-existing, wrongly-permissioned file
         except OSError:
@@ -449,6 +453,8 @@ def _fetch_runtime(args, plan: dict, bin_dir: Path) -> None:
         url = fetch.asset_url(args.llama_version)
     else:
         url = plan["url"]
+    if not url:
+        raise fetch.FetchError("no published runtime for this platform")
 
     print(f"  llama.cpp runtime  ({fetch.fmt_size(plan['size'] or 0)})")
     if not _confirm("download it?", args.auto):

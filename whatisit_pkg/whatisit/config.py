@@ -116,7 +116,10 @@ def save_config(cfg: dict) -> Path:
     # Create with 0600 from the start rather than write-then-chmod: the latter
     # leaves a window where the file sits at the umask default -- group-readable
     # on the shared-NFS-home clusters this targets -- readable by a co-tenant.
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    if os.name == 'nt':
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    else:
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     # The 0o600 above applies only at CREATION; a pre-existing file keeps
     # whatever mode it had. fchmod on the open fd closes that gap, race-free
     # because it acts on the fd rather than the path.

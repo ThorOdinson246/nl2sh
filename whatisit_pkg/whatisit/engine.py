@@ -169,7 +169,11 @@ def _write_private(path: Path, text: str) -> None:
     whatever it points to. O_NOFOLLOW turns that into a hard ELOOP failure
     instead of a silent overwrite of an arbitrary file.
     """
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    # O_NOFOLLOW is POSIX-only; Windows has no equivalent flag on os.open.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if os.name != "nt":
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o600)
     try:
         # The 0o600 above applies ONLY when open() creates the file. Without
         # this, a stale group-readable server.token would stay group-readable
