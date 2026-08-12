@@ -125,7 +125,7 @@ def save_config(cfg: dict) -> Path:
     # because it acts on the fd rather than the path.
     try:
         os.fchmod(fd, 0o600)
-    except OSError:
+    except (OSError, AttributeError):
         pass
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps(cfg, indent=2) + "\n")
