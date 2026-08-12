@@ -17,9 +17,11 @@ rm -rf /
 ## Install
 
 ```bash
-pip install whatisit
+pipx install whatisit
 whatisit setup
 ```
+
+`pip install whatisit` works too, inside a virtualenv or on conda.
 
 `setup` fetches the model and a `llama.cpp` runtime, asking before each
 download and verifying the checksum afterwards. On Linux with a glibc older
