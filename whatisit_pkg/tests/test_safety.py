@@ -52,6 +52,10 @@ MUST_FLAG_DANGER = [
     "/usr/bin/rm -rf /",
     'sh -c "rm -rf /"',
     'bash -c "rm -rf /"',
+    "bash -c 'echo ready; rm -rf /'",    # separators inside the -c string are not top-level
+    "bash -lc 'rm -rf /'",               # -c can be bundled with other shell flags
+    "sh -xc 'rm -rf /'",
+    "eval 'echo ready; rm -rf /'",       # eval's quoted string may contain shell operators
     "command rm -rf /",
     "builtin rm -rf /",
     "exec rm -rf /",

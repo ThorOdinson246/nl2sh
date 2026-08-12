@@ -654,7 +654,61 @@ def split_segments(command: str) -> list[str]:
     looks for `>` followed by a critical path. The negative lookbehind keeps
     `>|` intact while still splitting ordinary pipes and `||`.
     """
-    return [s.strip() for s in re.split(r"\|\||&&|(?<!>)\|(?!\|)|[;&\n]", command) if s.strip()]
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    i = 0
+
+    while i < len(command):
+        ch = command[i]
+
+        if escaped:
+            current.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            current.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+
+        # `>|` is one force-clobber redirect token, not a redirect followed by
+        # a pipeline. Keep its pipe with the current segment.
+        if ch == "|" and current and current[-1] == ">":
+            current.append(ch)
+            i += 1
+            continue
+        if ch in "|;&\n":
+            segment = "".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current = []
+            # `&&` and `||` are one boundary. A single `&`/`|` is a boundary too.
+            if i + 1 < len(command) and command[i + 1] == ch and ch in "&|":
+                i += 1
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    segment = "".join(current).strip()
+    if segment:
+        segments.append(segment)
+    return segments
 
 
 def check(command: str) -> list[tuple[str, str]]:
@@ -745,9 +799,13 @@ def check(command: str) -> list[tuple[str, str]]:
         verb = toks[0].rsplit("/", 1)[-1]
 
         # `bash -c "<command>"` hides the whole command inside a string argument.
+        # Shells accept option bundles, so `bash -lc` and `sh -xc` carry the same
+        # command-string semantics as a standalone `-c`.
         if verb in SHELL_RUNNERS:
             for i, t in enumerate(toks[1:], start=1):
-                if t == "-c" and i + 1 < len(toks):
+                if t == "--" or not t.startswith("-"):
+                    break
+                if not t.startswith("--") and "c" in t[1:] and i + 1 < len(toks):
                     findings.extend(check(toks[i + 1]))
                     break
 
