@@ -192,6 +192,30 @@ def _tokenize(segment: str) -> list[str]:
         return segment.split()
 
 
+def _strip_command_prefixes(tokens: list[str]) -> list[str]:
+    """Remove assignments, wrappers and wrapper options before a real command."""
+    toks = list(tokens)
+    while toks:
+        head = toks[0]
+        if ("=" in head and not head.startswith(("-", "/"))
+                and head.split("=", 1)[0].isidentifier()):
+            toks = toks[1:]
+            continue
+        base = head.rsplit("/", 1)[-1]
+        if base not in WRAPPERS:
+            break
+        toks = toks[1:]
+        value_opts = WRAPPER_VALUE_OPTS.get(base, set())
+        while toks and toks[0] != "--" and toks[0].startswith("-"):
+            opt = toks[0]
+            toks = toks[1:]
+            if opt in value_opts and toks and not toks[0].startswith("-"):
+                toks = toks[1:]
+        if toks and toks[0] == "--":
+            toks = toks[1:]
+    return toks
+
+
 def _norm_path(tok: str) -> str:
     """Canonicalize a target for comparison against CRITICAL_TARGETS.
 
@@ -671,21 +695,9 @@ PLACEHOLDER_HINT = re.compile(
     r"\bcontainer[-_]id\b|example\.com|username/repo)")
 
 
-def split_segments(command: str) -> list[str]:
-    """Split on shell operators so each clause is judged on its own.
-
-    A correct first clause followed by a destructive one is a real observed
-    failure mode, so every segment is checked independently. Patterns that must
-    SEE an operator belong in WHOLE_DANGER instead.
-
-    A lone `|` is a pipe, but `>|` is bash's force-clobber redirect operator --
-    a single token, not "redirect then pipe". Splitting on that `|` tore
-    `: >|/etc/passwd` into `: >` and `/etc/passwd`, and neither half contains
-    both the redirect and the target, so the write got past every check that
-    looks for `>` followed by a critical path. The negative lookbehind keeps
-    `>|` intact while still splitting ordinary pipes and `||`.
-    """
-    segments: list[str] = []
+def _split_top_level(command: str) -> list[tuple[str, str | None]]:
+    """Return quote-aware ``(clause, following operator)`` pairs."""
+    parts: list[tuple[str, str | None]] = []
     current: list[str] = []
     quote: str | None = None
     escaped = False
@@ -717,29 +729,63 @@ def split_segments(command: str) -> list[str]:
             continue
 
         # `>|` is one force-clobber redirect token, not a redirect followed by
-        # a pipeline. Keep its pipe with the current segment.
+        # a pipeline. Keep its pipe with the current clause.
         if ch == "|" and current and current[-1] == ">":
             current.append(ch)
             i += 1
             continue
         if ch in "|;&\n":
-            segment = "".join(current).strip()
-            if segment:
-                segments.append(segment)
-            current = []
-            # `&&` and `||` are one boundary. A single `&`/`|` is a boundary too.
+            operator = ch
             if i + 1 < len(command) and command[i + 1] == ch and ch in "&|":
+                operator += ch
                 i += 1
+            clause = "".join(current).strip()
+            if clause:
+                parts.append((clause, operator))
+            current = []
             i += 1
             continue
 
         current.append(ch)
         i += 1
 
-    segment = "".join(current).strip()
-    if segment:
-        segments.append(segment)
-    return segments
+    clause = "".join(current).strip()
+    if clause:
+        parts.append((clause, None))
+    return parts
+
+
+def split_segments(command: str) -> list[str]:
+    """Split on top-level shell operators so each clause is judged on its own.
+
+    A correct first clause followed by a destructive one is a real observed
+    failure mode, so every segment is checked independently. Patterns that must
+    SEE an operator belong in WHOLE_DANGER instead.
+
+    Quotes are preserved so an operator inside ``bash -c '...'`` remains part
+    of the command string that the recursive shell-runner check inspects.
+    """
+    return [clause for clause, _ in _split_top_level(command)]
+
+
+def _pipelines(command: str) -> list[list[str]]:
+    """Return top-level pipelines without confusing ``||`` or quoted pipes."""
+    out: list[list[str]] = []
+    pipeline: list[str] = []
+    for clause, operator in _split_top_level(command):
+        pipeline.append(clause)
+        if operator != "|":
+            if len(pipeline) > 1:
+                out.append(pipeline)
+            pipeline = []
+    if len(pipeline) > 1:
+        out.append(pipeline)
+    return out
+
+
+def _is_code_interpreter(verb: str) -> bool:
+    return (verb in SHELL_RUNNERS or verb in {"perl", "ruby", "node", "php"}
+            or bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", verb)))
 
 
 def check(command: str) -> list[tuple[str, str]]:
@@ -762,6 +808,26 @@ def check(command: str) -> list[tuple[str, str]]:
         if pat.search(scan):
             findings.append(("CAUTION", why))
 
+    # Regexes correctly catch the common `curl | bash` spelling, but executable
+    # paths and wrappers are semantic no-ops: `| /bin/bash`, `| env bash`, and
+    # `| sudo /usr/bin/python3 -` execute the same bytes. Tokenize each top-level
+    # pipeline, strip those prefixes, and compare executable basenames.
+    for pipeline in _pipelines(scan):
+        commands = [_strip_command_prefixes(_tokenize(clause)) for clause in pipeline]
+        for i, toks in enumerate(commands[:-1]):
+            if not toks or toks[0].rsplit("/", 1)[-1] not in {"curl", "wget"}:
+                continue
+            for downstream in commands[i + 1:]:
+                if not downstream:
+                    continue
+                interpreter = downstream[0].rsplit("/", 1)[-1]
+                if _is_code_interpreter(interpreter):
+                    why = ("pipes remote content straight into a shell"
+                           if interpreter in SHELL_RUNNERS
+                           else "pipes remote content straight into an interpreter")
+                    findings.append(("DANGER", why))
+                    break
+
     # `cd / && rm -rf *` is identical in effect to `rm -rf /`, but judging each
     # segment in isolation sees only a harmless-looking `rm -rf *`. Track a cd
     # into a critical directory so later segments are read in that light.
@@ -780,38 +846,7 @@ def check(command: str) -> list[tuple[str, str]]:
     cd_seen = False
 
     for seg in split_segments(scan):
-        toks = _tokenize(seg)
-        if not toks:
-            continue
-
-        # Strip no-op wrappers and env assignments, then basename the binary.
-        # Without this, `/bin/rm -rf /`, `sudo rm -rf /`, `env x=1 rm -rf /`,
-        # `nohup rm -rf /` and `nice rm -rf /` all passed clean while running rm.
-        while toks:
-            head = toks[0]
-            if ("=" in head and not head.startswith(("-", "/"))
-                    and head.split("=", 1)[0].isidentifier()):
-                toks = toks[1:]          # VAR=value prefix
-                continue
-            base = head.rsplit("/", 1)[-1]
-            if base in WRAPPERS:
-                toks = toks[1:]
-                # A second audit found stripping only the wrapper's NAME left
-                # its own option as the new head token -- `sudo -u root rm -rf /`,
-                # `env -i rm -rf /`, `nice -n 19 rm -rf /` all left `-u`/`-i`/`-n`
-                # unrecognized as a verb, so `rm` itself was never inspected.
-                # Consume the wrapper's own options too, including one that
-                # takes a SEPARATE value token (`-n 19`, but not `-n19`).
-                value_opts = WRAPPER_VALUE_OPTS.get(base, set())
-                while toks and toks[0] != "--" and toks[0].startswith("-"):
-                    opt = toks[0]
-                    toks = toks[1:]
-                    if opt in value_opts and toks and not toks[0].startswith("-"):
-                        toks = toks[1:]
-                if toks and toks[0] == "--":
-                    toks = toks[1:]
-                continue
-            break
+        toks = _strip_command_prefixes(_tokenize(seg))
         if not toks:
             continue
 
