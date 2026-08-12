@@ -83,9 +83,9 @@ class TestStripCliChrome:
 
 # ------------------------------------------------------------- private write
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="os.O_NOFOLLOW is not available on Windows")
 class TestWritePrivate:
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Unix permission bits are not enforced on Windows")
     def test_creates_file_with_0600(self, tmp_path):
         p = tmp_path / "server.token"
         engine._write_private(p, "supersecret")
@@ -98,6 +98,8 @@ class TestWritePrivate:
         engine._write_private(p, "new")
         assert p.read_text() == "new"
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Unix permission bits are not enforced on Windows")
     def test_pre_existing_loosely_permissioned_file_is_tightened(self, tmp_path):
         p = tmp_path / "server.token"
         p.write_text("old")
@@ -105,6 +107,8 @@ class TestWritePrivate:
         engine._write_private(p, "new-secret-token")
         assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="os.O_NOFOLLOW is not available on Windows")
     def test_refuses_to_follow_a_symlink(self, tmp_path):
         target = tmp_path / "outside_file.txt"
         target.write_text("do not touch me")

@@ -255,8 +255,6 @@ class TestExtract:
         with pytest.raises(fetch.FetchError, match="link escapes"):
             fetch.extract_runtime(archive, tmp_path / "dest")
 
-    @pytest.mark.skipif(sys.platform == "win32",
-                        reason="absolute symlink error text differs on Windows")
     def test_absolute_symlink_is_rejected(self, tmp_path):
         src = tmp_path / "src" / "llama-b1"
         src.mkdir(parents=True)
@@ -428,16 +426,19 @@ class TestSetupCommand:
         assert cli.cmd_setup(_Args(auto=True, runtime_only=True), cfg) == 0
         assert cfg["force_tcp"] is True
 
-    @pytest.mark.skipif(sys.platform == "win32",
-                        reason="asset_url() is None on unsupported Windows host platform")
     def test_upstream_runtime_leaves_the_transport_alone(self, home, monkeypatch, tmp_path):
         monkeypatch.setattr(fetch, "runtime_plan",
                             lambda *a, **k: {"kind": "upstream", "url": "https://x/u.tar.gz",
                                              "sha256": None, "size": 10, "reason": "", "warn": ""})
+        # Upstream path calls asset_url/asset_name against the real host
+        # platform; pin them so Windows (and other unsupported hosts) still
+        # exercise the force_tcp omission branch.
+        monkeypatch.setattr(fetch, "asset_url", lambda *a, **k: "https://x/u.tar.gz")
+        monkeypatch.setattr(fetch, "asset_name", lambda *a, **k: "u.tar.gz")
         monkeypatch.setattr(fetch, "existing_llama_server", lambda: None)
         monkeypatch.setattr(fetch, "free_bytes", lambda p: 10 ** 12)
         monkeypatch.setattr(fetch, "release_digests",
-                            lambda b, **k: {fetch.asset_name(b): "abc"})
+                            lambda b, **k: {"u.tar.gz": "abc"})
         monkeypatch.setattr(fetch, "download",
                             lambda url, dest, **k: (dest.parent.mkdir(parents=True, exist_ok=True),
                                                     dest.write_bytes(b"x"), dest)[-1])
