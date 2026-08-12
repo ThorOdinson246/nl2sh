@@ -28,8 +28,7 @@ import urllib.request
 from pathlib import Path
 
 from . import config as cfg_mod
-from . import hostctx
-from . import lms_backend
+from . import hostctx, lms_backend
 from .extract import extract
 
 HOST = "127.0.0.1"
@@ -420,7 +419,8 @@ def _find_server_bin(cfg: dict) -> Path | None:
     return None
 
 
-def _query_lms(cfg: dict, user_msg: str, n: int, system: str | None) -> list[tuple[str, str | None]]:
+def _query_lms(cfg: dict, user_msg: str, n: int, system: str | None) -> \
+        list[tuple[str, str | None]]:
     """n one-shot lms chat calls. finish_reason is always treated as stop."""
     out = []
     for _ in range(max(1, n)):
