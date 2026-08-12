@@ -37,6 +37,9 @@ runtime/lib/
 runtime/raw.txt
 scratch/
 
+# Nix build symlink.
+/result
+
 # Ollama models, wherever a script materializes them.
 ollama_models/
 *.ollama/
