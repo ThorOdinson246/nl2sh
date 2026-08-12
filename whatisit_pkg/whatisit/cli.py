@@ -76,7 +76,7 @@ def _log_query(prompt: str, cmds: list, elapsed: float, mode: str) -> None:
         fd = os.open(str(path), flags, 0o600)
         try:
             os.fchmod(fd, 0o600)   # also covers a pre-existing, wrongly-permissioned file
-        except OSError:
+        except (OSError, AttributeError):
             pass
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

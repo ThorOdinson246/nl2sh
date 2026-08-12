@@ -180,7 +180,7 @@ def _write_private(path: Path, text: str) -> None:
         # across every restart, on exactly the shared-NFS-home clusters this
         # targets.
         os.fchmod(fd, 0o600)
-    except OSError:
+    except (OSError, AttributeError):
         pass
     with os.fdopen(fd, "w") as f:
         f.write(text)
