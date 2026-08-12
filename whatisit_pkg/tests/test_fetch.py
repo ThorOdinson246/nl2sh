@@ -299,6 +299,8 @@ def home(monkeypatch, tmp_path):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+    # Isolate from a developer machine that has LM Studio on PATH.
+    monkeypatch.setattr(cli.lms_backend, "find_lms", lambda: None)
     return tmp_path
 
 
