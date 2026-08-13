@@ -25,6 +25,16 @@ from .safety import check
 _TTY = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
+def _is_windows() -> bool:
+    """Isolated so tests can fake Windows without rewriting global os.name.
+
+    Monkeypatching os.name="nt" on Linux breaks pathlib.Path.home() (used by
+    config_dir during main()), which then raises RuntimeError looking for a
+    Windows home directory that does not exist on the CI host.
+    """
+    return os.name == "nt"
+
+
 def _c(code: str, s: str) -> str:
     return f"\033[{code}m{s}\033[0m" if _TTY else s
 
@@ -167,6 +177,10 @@ def cmd_query(args, cfg: dict) -> int:
 
     if not args.execute:
         return 0
+
+    if _is_windows():
+        print("whatisit: --execute is disabled on Windows", file=sys.stderr)
+        return 7
 
     # ---- execution path ----
     # With several candidates on screen, do NOT assume #1. The numbering only
