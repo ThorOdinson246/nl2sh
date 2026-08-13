@@ -154,7 +154,7 @@ class TestCmdQueryQuietDangerRefusal:
                 (["ls -la"], 0.01, "server"))
         rc = cli.main(["-e", "list", "files"])
         assert rc == 7
-        assert "disabled" in capsys.readouterr().out
+        assert "disabled" in capsys.readouterr().err
 
 # ------------------------------------------------------------------ parser
 

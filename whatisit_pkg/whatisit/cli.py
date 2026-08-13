@@ -179,7 +179,7 @@ def cmd_query(args, cfg: dict) -> int:
         return 0
 
     if _is_windows():
-        print("warning: --execute is disabled on windows for safety reasons (no classifier)")
+        print("whatisit: --execute is disabled on Windows", file=sys.stderr)
         return 7
 
     # ---- execution path ----

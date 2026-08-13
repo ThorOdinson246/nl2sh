@@ -74,3 +74,4 @@ hooks/
 
 # pip build
 whatisit_pkg/build/
+whatisit_pkg/dist/
