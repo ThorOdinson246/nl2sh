@@ -25,7 +25,6 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 from . import config as cfg_mod
@@ -120,12 +119,14 @@ def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
         finally:
             conn.close()
 
-    port = running_port()
-    if port is None:
+    state = _tcp_server_state()
+    if state is None:
         raise RuntimeError("no running whatisit server")
-    req = urllib.request.Request(f"http://{HOST}:{port}{endpoint}", data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        payload = _read_capped(r)
+    port, pid = state
+    status, payload = _verified_tcp_request(
+        port, pid, endpoint, data=data, headers=headers, timeout=timeout)
+    if status != 200:
+        raise RuntimeError(f"server returned {status}: {payload[:200]!r}")
     return json.loads(payload) if payload else {}
 
 
@@ -308,6 +309,28 @@ def _wait_for_tcp_connection_owner(pid: int, server_port: int, client_port: int,
         time.sleep(min(0.01, max(0, deadline - time.monotonic())))
 
 
+def _verified_tcp_request(port: int, expected_pid: int, endpoint: str,
+                          data: bytes | None = None, headers: dict | None = None,
+                          timeout: float = 120.0) -> tuple[int, bytes]:
+    """Send one request only after attributing its connection to our server."""
+    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
+    try:
+        # Connect first without transmitting HTTP headers or a body.  The
+        # server-side socket for this exact connection must belong to the saved
+        # llama-server PID before credentials or prompt data can leave us.
+        conn.connect()
+        if conn.sock is None:
+            raise RuntimeError("TCP connection has no socket")
+        client_port = conn.sock.getsockname()[1]
+        if not _wait_for_tcp_connection_owner(expected_pid, port, client_port, timeout):
+            raise RuntimeError("TCP connection is not owned by the expected llama-server")
+        conn.request("POST" if data else "GET", endpoint, body=data, headers=headers or {})
+        response = conn.getresponse()
+        return response.status, _read_capped(response)
+    finally:
+        conn.close()
+
+
 def _alive(port: int | None = None, timeout: float = 0.6,
            expected_pid: int | None = None) -> bool:
     sp = _state_dir() / "server.sock"
@@ -326,28 +349,17 @@ def _alive(port: int | None = None, timeout: float = 0.6,
     token = _read_token()
     if not token:
         return False
-    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
     try:
-        # Establish the connection without transmitting HTTP headers, then
-        # prove that its server-side socket belongs to the expected process.
-        # A process taking over the port after the earlier listener check can
-        # therefore never receive the bearer token.
-        conn.connect()
-        if conn.sock is None:
-            return False
-        client_port = conn.sock.getsockname()[1]
-        if not _wait_for_tcp_connection_owner(expected_pid, port, client_port, timeout):
-            return False
-        conn.request("GET", "/v1/models",
-                     headers={"Authorization": f"Bearer {token}"})
-        return conn.getresponse().status == 200
+        status, _ = _verified_tcp_request(
+            port, expected_pid, "/v1/models",
+            headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        return status == 200
     except Exception:
         return False
-    finally:
-        conn.close()
 
 
-def running_port() -> int | None:
+def _tcp_server_state() -> tuple[int, int] | None:
+    """Return the recorded TCP port and PID after validating process identity."""
     p = _port_file()
     if not p.exists():
         return None
@@ -356,7 +368,15 @@ def running_port() -> int | None:
         pid = int((_state_dir() / "server.pid").read_text().strip())
     except (OSError, ValueError):
         return None
-    return port if _is_our_server(pid) and _alive(port, expected_pid=pid) else None
+    return (port, pid) if _is_our_server(pid) else None
+
+
+def running_port() -> int | None:
+    state = _tcp_server_state()
+    if state is None:
+        return None
+    port, pid = state
+    return port if _alive(port, expected_pid=pid) else None
 
 
 def _is_our_server(pid: int) -> bool:

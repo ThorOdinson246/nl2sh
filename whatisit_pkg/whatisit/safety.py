@@ -75,7 +75,7 @@ DESTRUCTIVE_VERBS = {"rm", "rmdir", "shred", "unlink", "srm"}
 # treatment as the other wrappers.
 WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "command",
             "builtin", "exec", "time", "stdbuf", "setsid", "xargs",
-            "busybox", "toybox"}
+            "busybox", "toybox", "timeout"}
 
 # A second audit found the wrapper strip only ever removed the wrapper's own
 # NAME, not its options -- so `sudo -u root rm -rf /`, `env -i rm -rf /` and
@@ -93,6 +93,7 @@ WRAPPER_VALUE_OPTS = {
     "ionice": {"-c", "-n", "-p", "-t"},
     "stdbuf": {"-i", "-o", "-e"},
     "xargs": {"-I", "-i", "-n", "-P", "-d", "-s", "-a", "-L", "-l"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
 }
 
 # Shells that take a command as a STRING argument -- the string has to be
@@ -110,8 +111,10 @@ SHELL_VALUE_OPTS = {
     "dash": {"-o", "+o"},
     "ash": {"-o", "+o"},
     "fish": {"-C", "--init-command", "-d", "--debug", "--debug-output",
-             "--features", "--profile-startup"},
+             "--debug-stack-frames", "--features", "--profile", "--profile-startup"},
 }
+
+_UNPARSEABLE_ENV_SPLIT = "__whatisit_unparseable_env_split__"
 
 # Individual files whose destruction breaks the system. The directory list above
 # does not cover them, so `shred -u /etc/passwd` and `unlink /etc/passwd` were
@@ -206,6 +209,91 @@ def _tokenize(segment: str) -> list[str]:
         return segment.split()
 
 
+def _split_env_string(value: str) -> list[str] | None:
+    r"""Parse the operand of GNU/BSD ``env -S`` without shell semantics.
+
+    In particular, ``\_`` outside quotes separates arguments.  Returning None
+    for malformed or unsupported input lets the caller fail closed instead of
+    silently inspecting a different command from the one env will execute.
+    """
+    # env expands ${NAME} from its inherited environment.  That value can be
+    # the executable itself and is not reliably derivable from the command
+    # string, so dynamic split strings are deliberately rejected.
+    if re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", value):
+        return None
+
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    started = False
+    i = 0
+    escapes = {" ": " ", "\t": "\t", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+               "#": "#", "$": "$", '"': '"', "'": "'", "\\": "\\"}
+
+    def finish() -> None:
+        nonlocal current, started
+        if started:
+            tokens.append("".join(current))
+            current = []
+            started = False
+
+    while i < len(value):
+        ch = value[i]
+        if quote is None and ch in " \t":
+            finish()
+            i += 1
+            continue
+        if quote is None and ch == "#" and not started:
+            break
+        if ch in "'\"":
+            if quote is None:
+                quote = ch
+                started = True
+                i += 1
+                continue
+            if quote == ch:
+                quote = None
+                i += 1
+                continue
+        if ch != "\\":
+            current.append(ch)
+            started = True
+            i += 1
+            continue
+        if i + 1 >= len(value):
+            return None
+        esc = value[i + 1]
+        if quote == "'":
+            if esc in {"'", "\\"}:
+                current.append(esc)
+            else:
+                current.extend(("\\", esc))
+            started = True
+            i += 2
+            continue
+        if esc == "c":
+            if quote == '"':
+                return None
+            break
+        if esc == "_":
+            if quote == '"':
+                current.append(" ")
+                started = True
+            else:
+                finish()
+            i += 2
+            continue
+        if esc not in escapes:
+            return None
+        current.append(escapes[esc])
+        started = True
+        i += 2
+    if quote is not None:
+        return None
+    finish()
+    return tokens
+
+
 def _strip_command_prefixes(tokens: list[str]) -> list[str]:
     """Remove assignments, wrappers and wrapper options before a real command."""
     toks = list(tokens)
@@ -235,11 +323,18 @@ def _strip_command_prefixes(tokens: list[str]) -> list[str]:
                     # env inserts these words back into argv before choosing
                     # the program.  Discarding the value hides the executable
                     # in `env -S '/bin/bash'` and similar spellings.
-                    toks = _tokenize(split_value) + toks
+                    split_tokens = _split_env_string(split_value)
+                    if split_tokens is None:
+                        return [_UNPARSEABLE_ENV_SPLIT]
+                    toks = split_tokens + toks
                     continue
             if opt in value_opts and toks and not toks[0].startswith("-"):
                 toks = toks[1:]
         if toks and toks[0] == "--":
+            toks = toks[1:]
+        if base == "timeout" and toks:
+            # timeout's first non-option operand is a duration; the following
+            # token is the command whose behavior the checker must inspect.
             toks = toks[1:]
     return toks
 
@@ -822,6 +917,52 @@ def _is_code_interpreter(verb: str) -> bool:
 
 def _shell_command_string(verb: str, args: list[str]) -> str | None:
     """Return the string a supported shell will execute via `-c`, if any."""
+    if verb == "fish":
+        # fish uses getopt semantics: a required short-option argument may be
+        # attached (`-Cecho`) or separate (`-C echo`).  Parse the bundle in
+        # order so a `c` inside an attached value is never mistaken for -c.
+        value_short = {"C", "d", "f", "D", "o", "p"}
+        optional_short = {"I"}
+        value_long = {opt for opt in SHELL_VALUE_OPTS["fish"] if opt.startswith("--")}
+        optional_long = {"--install"}
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                return None
+            if arg in {"--command", "-c"}:
+                return args[i + 1] if i + 1 < len(args) else None
+            if arg.startswith("--command="):
+                return arg.split("=", 1)[1]
+            if arg in value_long:
+                i += 2
+                continue
+            if any(arg.startswith(opt + "=") for opt in value_long):
+                i += 1
+                continue
+            if arg in optional_long:
+                i += 1
+                continue
+            if any(arg.startswith(opt + "=") for opt in optional_long):
+                i += 1
+                continue
+            if arg.startswith("-") and not arg.startswith("--"):
+                bundle = arg[1:]
+                consumed_next = False
+                for pos, option in enumerate(bundle):
+                    if option == "c":
+                        attached = bundle[pos + 1:]
+                        return attached or (args[i + 1] if i + 1 < len(args) else None)
+                    if option in value_short:
+                        consumed_next = not bool(bundle[pos + 1:])
+                        break
+                    if option in optional_short:
+                        break
+                i += 2 if consumed_next else 1
+                continue
+            return None
+        return None
+
     value_opts = SHELL_VALUE_OPTS.get(verb, set())
     i = 0
     while i < len(args):
@@ -836,6 +977,10 @@ def _shell_command_string(verb: str, args: list[str]) -> str | None:
             i += 2
             continue
         if any(arg.startswith(opt + "=") for opt in value_opts if opt.startswith("--")):
+            i += 1
+            continue
+        if any(arg.startswith(opt) and arg != opt for opt in value_opts
+               if len(opt) == 2 and opt[0] in "-+"):
             i += 1
             continue
         if arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
@@ -873,6 +1018,8 @@ def check(command: str) -> list[tuple[str, str]]:
     # pipeline, strip those prefixes, and compare executable basenames.
     for pipeline in _pipelines(scan):
         commands = [_strip_command_prefixes(_tokenize(clause)) for clause in pipeline]
+        if any(toks and toks[0] == _UNPARSEABLE_ENV_SPLIT for toks in commands):
+            findings.append(("DANGER", "env -S string could not be safely parsed"))
         for i, toks in enumerate(commands[:-1]):
             if not toks or toks[0].rsplit("/", 1)[-1] not in {"curl", "wget"}:
                 continue
@@ -907,6 +1054,9 @@ def check(command: str) -> list[tuple[str, str]]:
     for seg in split_segments(scan):
         toks = _strip_command_prefixes(_tokenize(seg))
         if not toks:
+            continue
+        if toks[0] == _UNPARSEABLE_ENV_SPLIT:
+            findings.append(("DANGER", "env -S string could not be safely parsed"))
             continue
 
         # A command name produced by substitution (`$(echo rm) -rf /`) can

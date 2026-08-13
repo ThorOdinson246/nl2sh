@@ -160,6 +160,10 @@ class TestTcpServerIdentity:
         class Response:
             status = 200
 
+            @staticmethod
+            def read(_size=-1):
+                return b""
+
         class Socket:
             @staticmethod
             def getsockname():
@@ -173,7 +177,7 @@ class TestTcpServerIdentity:
                 events.append("connect")
 
             @staticmethod
-            def request(method, endpoint, headers):
+            def request(method, endpoint, body=None, headers=None):
                 events.append(("request", method, endpoint, headers.get("Authorization")))
 
             @staticmethod
@@ -227,6 +231,28 @@ class TestTcpServerIdentity:
         monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
         monkeypatch.setattr(engine.http.client, "HTTPConnection", lambda *a, **k: Connection())
         assert engine._alive(43210, expected_pid=1234) is False
+
+    def test_request_verifies_the_prompt_connection_before_sending(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_tcp_server_state", lambda: (43210, 1234))
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        captured = {}
+
+        def fake_request(port, expected_pid, endpoint, data=None, headers=None, timeout=120.0):
+            captured.update(port=port, expected_pid=expected_pid, endpoint=endpoint,
+                            data=data, headers=headers, timeout=timeout)
+            return 200, b'{"choices": []}'
+
+        monkeypatch.setattr(engine, "_verified_tcp_request", fake_request)
+        result = engine._request("/v1/chat/completions", {"messages": ["secret prompt"]})
+
+        assert result == {"choices": []}
+        assert captured["port"] == 43210
+        assert captured["expected_pid"] == 1234
+        assert captured["endpoint"] == "/v1/chat/completions"
+        assert b"secret prompt" in captured["data"]
+        assert captured["headers"]["Authorization"] == "Bearer secret-token"
 
     def test_start_server_keeps_token_out_of_argv_and_log(self, monkeypatch, tmp_path):
         model = tmp_path / "model.gguf"
