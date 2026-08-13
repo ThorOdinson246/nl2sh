@@ -84,40 +84,13 @@ Python 3.9+, Linux or macOS. The CLI has no dependencies of its own.
 
 ### Nix
 
-Run without installing:
-
 ```bash
-nix run github:ThorOdinson246/whatisit-nl2sh -- setup        # fetch the model
-nix run github:ThorOdinson246/whatisit-nl2sh -- list files changed this week
-```
-
-Install on your system:
-
-```bash
-# ad-hoc, as a user
+nix run github:ThorOdinson246/whatisit-nl2sh -- setup
 nix profile install github:ThorOdinson246/whatisit-nl2sh
-
-# or from a local checkout
-nix profile install .#whatisit
 ```
 
-On NixOS, add it to your flake inputs and to `environment.systemPackages`:
-
-```nix
-{
-  inputs.whatisit-nl2sh.url = "github:ThorOdinson246/whatisit-nl2sh";
-
-  outputs = { self, nixpkgs, whatisit-nl2sh, ... }: {
-    nixosConfigurations.my_system = nixpkgs.lib.nixosSystem {
-      modules = [
-        ({ pkgs, ... }: {
-          environment.systemPackages = [ whatisit-nl2sh.packages.${pkgs.stdenv.hostPlatform.system}.default ];
-        })
-      ];
-    };
-  };
-}
-```
+The flake wires in `llama.cpp` from nixpkgs, so `setup` only fetches the model.
+On NixOS, add the flake to your inputs and pull `packages.<system>.default`.
 
 ## Use
 
