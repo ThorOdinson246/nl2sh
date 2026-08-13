@@ -7,8 +7,8 @@
 
   outputs = { self, nixpkgs }:
     let
-      # Keep this in sync with whatisit_pkg/pyproject.toml.
-      version = "0.2.1";
+      version = (builtins.fromTOML
+        (builtins.readFile ./whatisit_pkg/pyproject.toml)).project.version;
 
       eachSystem = f: nixpkgs.lib.genAttrs
         [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ]
