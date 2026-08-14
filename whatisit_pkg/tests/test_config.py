@@ -364,3 +364,17 @@ class TestRemoteConfig:
         c = cfg_mod.remote_config({"openai_base_url": "http://h/v1",
                                    "openai_model": "  "})
         assert c["model"] is None
+
+    def test_empty_env_overrides_config_and_goes_local(self, monkeypatch):
+        """WHATISIT_OPENAI_BASE_URL= must not fall through to config.json."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("WHATISIT_OPENAI_BASE_URL", "")
+        assert cfg_mod.remote_config({"openai_base_url": "http://h/v1",
+                                      "openai_model": "m"}) is None
+
+    def test_empty_env_key_clears_stored_key(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("WHATISIT_OPENAI_API_KEY", "")
+        c = cfg_mod.remote_config({"openai_base_url": "http://h/v1",
+                                   "openai_api_key": "stored"})
+        assert c["api_key"] == ""

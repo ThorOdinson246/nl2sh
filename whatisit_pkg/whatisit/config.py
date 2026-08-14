@@ -43,16 +43,22 @@ def remote_config(cfg: dict, timeout_default: float = 120.0) -> dict | None:
       max_tokens generation budget in tokens (512 default: remote endpoints
                  often run reasoning models that spend tokens 'thinking' before
                  emitting the command, so the local 64-token budget is too small)
-    An empty openai_base_url (or empty env value) means local mode.
+    An empty openai_base_url (or empty env value) means local mode. An empty
+    env value wins over a stored config value, so `WHATISIT_OPENAI_BASE_URL=`
+    turns remote mode off without editing config.json.
     """
-    base = env(ENDPOINT_ENV["openai_base_url"]) or cfg.get("openai_base_url")
+    raw = env(ENDPOINT_ENV["openai_base_url"])
+    base = cfg.get("openai_base_url") if raw is None else raw
     if base is None:
         return None
     base = str(base).strip()
     if not base:
         return None
-    key = env(ENDPOINT_ENV["openai_api_key"]) or cfg.get("openai_api_key") or ""
-    model = env(ENDPOINT_ENV["openai_model"]) or cfg.get("openai_model") or None
+    raw_key = env(ENDPOINT_ENV["openai_api_key"])
+    key = cfg.get("openai_api_key") if raw_key is None else raw_key
+    key = "" if key is None else str(key)
+    raw_model = env(ENDPOINT_ENV["openai_model"])
+    model = cfg.get("openai_model") if raw_model is None else raw_model
     if model is not None:
         model = str(model).strip() or None
     max_tokens = _openai_int(ENDPOINT_ENV["openai_max_tokens"], cfg, "openai_max_tokens",
