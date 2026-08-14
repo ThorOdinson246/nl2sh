@@ -124,6 +124,22 @@ whatisit -e remove every .pyc file under this tree
 `whatisit stop` shuts down the resident model server. `whatisit config --set threads=4`
 changes settings.
 
+## Remote endpoints
+
+To use a hosted API, Ollama, or a `llama.cpp` server you already have running:
+
+```bash
+whatisit config --set openai_base_url=http://127.0.0.1:8080/v1 openai_model=your-model-name
+export WHATISIT_OPENAI_API_KEY=sk-...   # optional; prefer env over the config file
+```
+
+`openai_model` is required. Empty `WHATISIT_OPENAI_BASE_URL=` (or
+`openai_base_url=`) returns to local mode. Extra knobs: `openai_timeout`
+(default 120 s) and `openai_max_tokens` (default 512, for reasoning models).
+
+This sends your request off the machine, so it is opt-in and whatisit prints a
+warning to stderr on every remote call. Prefer `https://`.
+
 ## How it works
 
 First call starts a small `llama.cpp` server and leaves it resident, so later
