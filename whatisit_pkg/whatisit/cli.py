@@ -539,7 +539,8 @@ def _doctor_remote(cfg: dict, remote: dict) -> int:
     try:
         names = engine.list_remote_models(remote)
     except Exception as e:
-        print(f"  {YELLOW('warn')}  endpoint   could not list models: {e}")
+        print(f"  {RED('FAIL')}  endpoint   could not reach it: {e}")
+        ok = False
     else:
         if model and model not in names:
             print(f"  {YELLOW('warn')}  endpoint   reachable, but {model} is not among "

@@ -559,7 +559,7 @@ def _query_remote(remote: dict, prompt: str, cfg: dict, n: int,
                                   timeout=remote.get("timeout", 120.0))
     out = post({**base, "temperature": greedy_temp, "n": 1})
     if n <= 1:
-        return out
+        return out[:1]
     sample_temp = max(0.6, greedy_temp)
     for _ in range(n - 1):
         if len(out) >= n:
@@ -569,7 +569,7 @@ def _query_remote(remote: dict, prompt: str, cfg: dict, n: int,
                          "n": 1, "top_p": 0.95})
         except Exception:
             pass  # alternatives are a bonus; never lose the greedy answer over them
-    return out
+    return out[:n]
 
 
 def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int,

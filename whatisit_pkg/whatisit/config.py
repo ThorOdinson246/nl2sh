@@ -73,7 +73,7 @@ def remote_config(cfg: dict, timeout_default: float = 120.0) -> dict | None:
 def _openai_int(env_suffix: str, cfg: dict, key: str, default):
     """Parse an int config value (env over cfg), falling back on garbage."""
     raw = env(env_suffix)
-    if raw in (None, ""):
+    if raw is None:
         raw = cfg.get(key)
     try:
         return int(raw) if raw not in (None, "") else default
