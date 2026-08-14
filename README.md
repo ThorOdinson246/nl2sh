@@ -84,6 +84,16 @@ whatisit doctor
 
 Python 3.9+, Linux or macOS. The CLI has no dependencies of its own.
 
+### Nix
+
+```bash
+nix run github:ThorOdinson246/whatisit-nl2sh -- setup
+nix profile install github:ThorOdinson246/whatisit-nl2sh
+```
+
+The flake wires in `llama.cpp` from nixpkgs, so `setup` only fetches the model.
+On NixOS, add the flake to your inputs and pull `packages.<system>.default`.
+
 ## Use
 
 Type the request as plain arguments. No quoting needed:
