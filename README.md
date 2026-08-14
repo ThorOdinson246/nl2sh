@@ -1,7 +1,9 @@
 # whatisit-nl2sh
 
-Ask for a shell command in plain English. Runs on your own machine, on CPU.
-No GPU, no API key, no network. Answers in about a second.
+Ask for a shell command in plain English. Local by default, on CPU. No GPU, no
+API key, no network. Answers in about a second. Optionally, it can also ask any
+OpenAI-compatible model service (OpenAI, Ollama, a remote or LAN `llama.cpp`, a
+compatible gateway) instead — see [Remote endpoints](#remote-endpoints).
 
 ![whatisit in use](whatisit.gif)
 
@@ -123,6 +125,50 @@ whatisit -e remove every .pyc file under this tree
 
 `whatisit stop` shuts down the resident model server. `whatisit config --set threads=4`
 changes settings.
+
+## Remote endpoints
+
+By default everything runs locally. If you want to point whatisit at an
+OpenAI-compatible endpoint instead — a hosted API, an Ollama server, or a
+`llama.cpp` server you already have running — set three things:
+
+```bash
+whatisit config --set \
+  openai_base_url=http://127.0.0.1:8080/v1 \
+  openai_model=your-model-name
+```
+
+* `openai_base_url` is the endpoint's base URL. It must be `http://` or
+  `https://`. Either `.../v1` or the full `.../v1/chat/completions` route works.
+* `openai_model` is the model name the endpoint should generate with (list them
+  with `curl $BASE/models`). This is required; whatisit will not guess one.
+* `openai_api_key` is the bearer token. It's optional — a LAN `llama.cpp` server
+  usually needs none. Prefer the environment over the config file so the secret
+  stays off disk:
+
+```bash
+export WHATISIT_OPENAI_API_KEY=sk-...
+```
+
+Whenever a base URL is configured, whatisit uses the remote backend and no
+longer needs a local model or `llama.cpp` at all. `-n N`, `-q`, `-e` and the
+safety checks all work identically. `whatisit doctor` reports the remote
+backend. Set `openai_base_url=` back to empty (or unset it) to return to the
+fully-local mode.
+
+A few extra knobs: `openai_timeout` (default 120 s) and `openai_max_tokens`
+(default 512). The token budget matters for reasoning models, which "think"
+inside the generation before emitting the command — the local 64-token default
+is too small for them, which is why remote mode defaults higher.
+
+### Privacy
+
+Remote mode sends your request (and the host context, if you've enabled
+`host_context`) to whatever the endpoint is. That is the one thing this tool
+otherwise promises never to do, so it is strictly opt-in and whatisit prints a
+warning to stderr on the first remote call. Don't type secrets into the prompt
+against a shared endpoint. Prefer an `https://` endpoint; over plain `http://`
+the request (and your key, if one is set) travels unencrypted.
 
 ## How it works
 

@@ -14,8 +14,67 @@ from pathlib import Path
 # The published filename on Hugging Face, not our identifier.
 MODEL_NAME = "nl2sh-1.5b-Q4_K_M.gguf"
 
+# OpenAI-compatible remote endpoint settings. Env wins over config.json so a
+# secret API key can live only in the environment, never on disk. Each of the
+# three keys is independent: setting only a base URL + model selects a keyless
+# backend (a local LAN llama-server), which is the common case for whatisit.
+# Suffixes for the WHATISIT_* / NL2SH_* env vars, per the env() helper.
+ENDPOINT_ENV = {
+    "openai_base_url": "OPENAI_BASE_URL",
+    "openai_api_key": "OPENAI_API_KEY",
+    "openai_model": "OPENAI_MODEL",
+    "openai_timeout": "OPENAI_TIMEOUT",
+    "openai_max_tokens": "OPENAI_MAX_TOKENS",
+}
+
 APP_NAME = "whatisit"
 LEGACY_NAME = "nl2sh"
+
+
+def remote_config(cfg: dict, timeout_default: float = 120.0) -> dict | None:
+    """Resolve the OpenAI-compatible endpoint, env over config.json.
+
+    Returns None when no base URL is configured (the fully-local default).
+    When a base URL is set it returns a dict with keys:
+      base_url  the configured endpoint (raw; engine normalizes it)
+      api_key   bearer token, or '' if unauthenticated (LAN llama-server)
+      model     the model name to send in the body, or None if not chosen
+      timeout    request timeout in seconds
+      max_tokens generation budget in tokens (512 default: remote endpoints
+                 often run reasoning models that spend tokens 'thinking' before
+                 emitting the command, so the local 64-token budget is too small)
+    An empty openai_base_url (or empty env value) means local mode.
+    """
+    base = env(ENDPOINT_ENV["openai_base_url"]) or cfg.get("openai_base_url")
+    if base is None:
+        return None
+    base = str(base).strip()
+    if not base:
+        return None
+    key = env(ENDPOINT_ENV["openai_api_key"]) or cfg.get("openai_api_key") or ""
+    model = env(ENDPOINT_ENV["openai_model"]) or cfg.get("openai_model") or None
+    if model is not None:
+        model = str(model).strip() or None
+    max_tokens = _openai_int(ENDPOINT_ENV["openai_max_tokens"], cfg, "openai_max_tokens",
+                             512)
+    timeout = _openai_int(ENDPOINT_ENV["openai_timeout"], cfg, "openai_timeout",
+                          timeout_default)
+    return {"base_url": str(base).strip(), "api_key": str(key),
+            "model": str(model) if model else None, "timeout": timeout,
+            "max_tokens": max_tokens}
+
+
+def _openai_int(env_suffix: str, cfg: dict, key: str, default):
+    """Parse an int config value (env over cfg), falling back on garbage."""
+    raw = env(env_suffix)
+    if raw in (None, ""):
+        raw = cfg.get(key)
+    try:
+        return int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
 SYSTEM_PROMPT = (
     "You are a shell command generator. Output exactly one line: a single "
     "POSIX/bash command that accomplishes the user's request. No prose, no "

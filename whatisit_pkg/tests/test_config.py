@@ -285,3 +285,82 @@ class TestLegacyDirMigration:
 
         msgs = cfg_mod.migrate_legacy_dirs(echo=lambda m: None)
         assert any("no longer resolves" in m for m in msgs)
+
+
+class TestRemoteConfig:
+    """remote_config() resolution: when it activates, env-over-config, secrets."""
+
+    def _clear(self, monkeypatch):
+        _clear_xdg(monkeypatch)
+        for suff in ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY",
+                     "OPENAI_TIMEOUT", "OPENAI_MAX_TOKENS"):
+            for pref in ("WHATISIT_", "NL2SH_"):
+                monkeypatch.delenv(pref + suff, raising=False)
+
+    def test_none_when_no_base_url(self, monkeypatch):
+        self._clear(monkeypatch)
+        assert cfg_mod.remote_config({}) is None
+
+    def test_empty_base_url_means_local(self, monkeypatch):
+        self._clear(monkeypatch)
+        assert cfg_mod.remote_config({"openai_base_url": ""}) is None
+
+    def test_resolves_from_config(self, monkeypatch):
+        self._clear(monkeypatch)
+        c = cfg_mod.remote_config({"openai_base_url": "http://h:1/v1",
+                                   "openai_model": "m",
+                                   "openai_api_key": "k"})
+        assert c["base_url"] == "http://h:1/v1"
+        assert c["model"] == "m"
+        assert c["api_key"] == "k"
+        assert c["max_tokens"] == 512
+        assert c["timeout"] == 120.0
+
+    def test_env_overrides_config(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("WHATISIT_OPENAI_BASE_URL", "http://env:2/v1")
+        monkeypatch.setenv("WHATISIT_OPENAI_MODEL", "env-model")
+        monkeypatch.setenv("WHATISIT_OPENAI_API_KEY", "env-key")
+        c = cfg_mod.remote_config({"openai_base_url": "http://cfg:1/",
+                                   "openai_model": "cfg-model",
+                                   "openai_api_key": "cfg-key"})
+        assert c["base_url"] == "http://env:2/v1"
+        assert c["model"] == "env-model"
+        assert c["api_key"] == "env-key"
+
+    def test_keyless_by_default(self, monkeypatch):
+        self._clear(monkeypatch)
+        c = cfg_mod.remote_config({"openai_base_url": "http://h/v1"})
+        assert c["api_key"] == ""
+        assert c["model"] is None
+
+    def test_timeout_and_max_tokens_overridable(self, monkeypatch):
+        self._clear(monkeypatch)
+        c = cfg_mod.remote_config({"openai_base_url": "http://h/v1",
+                                   "openai_timeout": 30, "openai_max_tokens": 1000})
+        assert c["timeout"] == 30
+        assert c["max_tokens"] == 1000
+
+    def test_env_timeout_precedence(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("WHATISIT_OPENAI_MAX_TOKENS", "256")
+        c = cfg_mod.remote_config({"openai_base_url": "http://h/v1",
+                                   "openai_max_tokens": 999})
+        assert c["max_tokens"] == 256
+
+    def test_garbage_numeric_values_fall_back(self, monkeypatch):
+        self._clear(monkeypatch)
+        c = cfg_mod.remote_config({"openai_base_url": "http://h/v1",
+                                   "openai_timeout": "abc", "openai_max_tokens": []})
+        assert c["timeout"] == 120.0
+        assert c["max_tokens"] == 512
+
+    def test_whitespace_only_base_url_means_local(self, monkeypatch):
+        self._clear(monkeypatch)
+        assert cfg_mod.remote_config({"openai_base_url": "   "}) is None
+
+    def test_whitespace_only_model_is_unset(self, monkeypatch):
+        self._clear(monkeypatch)
+        c = cfg_mod.remote_config({"openai_base_url": "http://h/v1",
+                                   "openai_model": "  "})
+        assert c["model"] is None

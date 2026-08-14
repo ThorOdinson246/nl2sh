@@ -119,6 +119,14 @@ def cmd_query(args, cfg: dict) -> int:
         print("whatisit: nothing to do -- give me a request in plain English", file=sys.stderr)
         return 2
 
+    # Remote mode sends the request (and host context, if enabled) somewhere
+    # else, which is the one thing this tool otherwise promises never to do.
+    # The warning is opt-in and goes to stderr so -q/$(...) output stays clean.
+    remote = cfg_mod.remote_config(cfg)
+    if remote is not None:
+        for w in engine.remote_warnings(remote):
+            print(DIM(f"  note: {w}"), file=sys.stderr)
+
     try:
         cmds, elapsed, mode = engine.generate(
             prompt, cfg, n=args.num, force_oneshot=args.oneshot, quiet=args.quiet)
@@ -510,8 +518,48 @@ def _fetch_model(args, spec: dict, model_file: Path, slot: Path) -> None:
         print(f"  registered: {slot.name} -> {model_file.name}")
 
 
+def _doctor_remote(cfg: dict, remote: dict) -> int:
+    """doctor output for an OpenAI-compatible backend. Local llama.cpp is unused."""
+    try:
+        base = engine.normalize_endpoint_url(remote["base_url"])
+    except ValueError as e:
+        print(f"  {RED('FAIL')}  remote     {e}")
+        print(f"  info  config     {cfg_mod.config_path()}")
+        print(f"\n{RED('Not ready.')}")
+        return 1
+    model = remote["model"]
+    ok = True
+    print(f"  {GREEN('ok')}    backend    OpenAI-compatible  {base}")
+    if model:
+        print(f"  {GREEN('ok')}    model      {model}")
+    else:
+        print(f"  {RED('FAIL')}  model      not set -- set openai_model or WHATISIT_OPENAI_MODEL")
+        ok = False
+    print(f"  info  auth       {'authenticated' if remote['api_key'] else 'no API key'}")
+    try:
+        names = engine.list_remote_models(remote)
+    except Exception as e:
+        print(f"  {YELLOW('warn')}  endpoint   could not list models: {e}")
+    else:
+        if model and model not in names:
+            print(f"  {YELLOW('warn')}  endpoint   reachable, but {model} is not among "
+                  f"{len(names)} advertised model(s)")
+        else:
+            print(f"  {GREEN('ok')}    endpoint   reachable ({len(names)} model(s))")
+    print(f"  info  config     {cfg_mod.config_path()}")
+    print(f"\n{GREEN('All good.') if ok else RED('Not ready.')}")
+    return 0 if ok else 1
+
+
 def cmd_doctor(args, cfg: dict) -> int:
     print(BOLD("whatisit doctor"))
+
+    # Remote mode means no local model or llama.cpp is required at all; the
+    # local diagnostics below are irrelevant (and would wrongly report failure).
+    remote = cfg_mod.remote_config(cfg)
+    if remote is not None:
+        return _doctor_remote(cfg, remote)
+
     ok = True
 
     model = cfg_mod.find_model()
@@ -584,13 +632,21 @@ def cmd_config(args, cfg: dict) -> int:
                         cfg[k] = v
         print(f"whatisit: wrote {cfg_mod.save_config(cfg)}")
     for k in sorted(cfg):
-        print(f"  {k} = {cfg[k]}")
+        v = cfg[k]
+        # Never print a stored API key; say it is set instead. Secrets belong in
+        # the environment (WHATISIT_OPENAI_API_KEY), but if one is in the
+        # config file it still must not be echoed back.
+        if k == "openai_api_key" and v:
+            v = "********"
+        print(f"  {k} = {v}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="whatisit", description="Natural language to shell command, fully local. No network.",
+        prog="whatisit",
+        description="Natural language to shell command, local by default. "
+                    "Optionally, any OpenAI-compatible endpoint.",
         epilog="examples:\n"
                "  whatisit find files larger than 100MB in this folder\n"
                "  whatisit -n 3 'find files bigger than 100MB'\n"

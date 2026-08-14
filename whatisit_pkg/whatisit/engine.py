@@ -1,10 +1,16 @@
-"""Model execution, in two modes.
+"""Model execution, in three modes.
 
-server mode (preferred)
+remote mode (opt-in)
+    An OpenAI-compatible endpoint (any provider, a LAN llama-server, or Ollama)
+    answers. Configured via openai_base_url / openai_model; needs no local
+    model file. The request text leaves the machine, so it is only active when
+    explicitly configured and the CLI warns about it.
+
+server mode (preferred, local)
     A `llama-server` process holds the model in RAM and answers over localhost
     HTTP. Started lazily on first query and left running.
 
-oneshot mode (fallback)
+oneshot mode (fallback, local)
     One `llama-cli` invocation per query.
 
 Why the server exists at all: measured in the target udocker environment, a
@@ -24,6 +30,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -316,41 +324,251 @@ def _post(port: int, body: dict) -> list[str]:
     return [(c["message"]["content"], c.get("finish_reason")) for c in data.get("choices", [])]
 
 
-def _query_server(port: int, prompt: str, cfg: dict, n: int,
-                  system: str | None = None) -> list[str]:
-    """Greedy answer first, then sampled alternatives.
+def _std_body(system: str, user_msg: str, cfg: dict) -> dict:
+    """The pieces any chat-completions body must have.
 
-    Getting this wrong was visible in real use: asking for 3 candidates used to
-    set temperature=0.6 for ALL of them, so the greedy answer -- the one plain
-    `whatisit` returns -- was absent from its own candidate list, and slot 1 was
-    just a dice roll. Observed: "count lines in all python files" offered
-    `grep -R -l '^$' *.py | wc -l` (counts FILES CONTAINING BLANK LINES) as #1
-    while correct answers sat at #2 and #3. Since callers treat #1 as the pick,
-    slot 1 must always be the model's best single guess.
+    Llama-server on our localhost and a remote OpenAI-compatible endpoint
+    accept the same core fields; the caller adds the transport/model-specific
+    ones (model name, repeat penalties, temperature).
     """
-    base = {
-        "messages": [{"role": "system", "content": system or cfg_mod.SYSTEM_PROMPT},
-                     {"role": "user", "content": prompt}],
+    return {
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user_msg}],
         "max_tokens": cfg.get("max_tokens", 64),
         "stop": STOP,
-        # Greedy decoding on this model reliably degenerates into flag spam on
-        # some requests -- `zip up this project` produced
-        # `zip -r -9 -q -n -j -0 -9 -n -j -0 ...` on 2 of 2 attempts, which is
-        # reproducible rather than unlucky. A small penalty breaks the loop
-        # without meaningfully changing well-behaved outputs.
-        "repeat_penalty": cfg.get("repeat_penalty", 1.08),
-        "repeat_last_n": 64,
     }
-    out = _post(port, {**base, "temperature": cfg.get("temperature", 0.0)})
+
+
+def _greedy_then_sample(base: dict, n: int, temperature: float,
+                        post) -> list:
+    """Greedy answer first, then sampled alternatives. post(body)->list.
+
+    This is the heart of `-n N`: slot 1 is always the greedy answer (callers
+    treat it as the pick), then `n-1` sampled, distinct-ish alternatives. A
+    failure during sampling must never cost the greedy answer we already have.
+    """
+    out = post({**base, "temperature": temperature})
     if n <= 1:
         return out
-    # Sampling is required for *distinct* alternatives; greedy repeats itself.
     try:
-        out += _post(port, {**base, "n": n - 1,
-                            "temperature": max(0.6, float(cfg.get("temperature") or 0)),
-                            "top_p": 0.95})
+        out += post({**base, "n": n - 1,
+                     "temperature": max(0.6, float(temperature)),
+                     "top_p": 0.95})
     except Exception:
         pass  # alternatives are a bonus; never lose the greedy answer over them
+    return out
+
+
+def _parse_choices(payload: object) -> list[tuple[str, object]]:
+    """Turn a chat-completions response into [(content, finish_reason)].
+
+    The content is untrusted model output (handled downstream by extract), but
+    the *shape* must still be validated: a proxy returning HTML or a partial
+    error instead of JSON should be an explicit failure, not a silent TypeError
+    deep in generate(). Non-string content (some reasoning models emit a dict)
+    is skipped rather than crashing on it.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list):
+        raise RuntimeError("endpoint response had no choices")
+    out = []
+    for c in payload["choices"]:
+        if not isinstance(c, dict):
+            continue
+        msg = c.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, str):
+            continue
+        out.append((content, c.get("finish_reason")))
+    if not out:
+        raise RuntimeError("endpoint response contained no usable choices")
+    return out
+
+
+class _NoCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow a redirect that changes scheme or host.
+
+    A bearer token is attached to the request; following a redirect elsewhere
+    (scheme or authority) would send that token to a host that never asked for
+    it. Returning None from redirect_request makes urllib surface the redirect
+    as an HTTPError, which we turn into a normal error message."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+            return None
+        try:
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+        except http.client.HTTPException:
+            return None
+
+
+def normalize_endpoint_url(base: str) -> str:
+    """Canonicalize a base URL: no trailing slash, no fragments/creds, http(s).
+
+    Accepts either `http://host:port/v1` or the full route
+    `http://host:port/v1/chat/completions`; either is reduced to the base to
+    which the engine appends `/chat/completions`. Raises ValueError on input a
+    remote request must never be built from.
+    """
+    base = (base or "").strip()
+    if not base:
+        raise ValueError("endpoint URL is empty")
+    if base.startswith(("http://", "https://")) is False:
+        raise ValueError("endpoint URL must start with http:// or https://")
+    p = urllib.parse.urlsplit(base)
+    if not p.hostname:
+        raise ValueError("endpoint URL has no host")
+    if p.username or p.password:
+        raise ValueError("endpoint URL must not embed credentials")
+    if p.fragment:
+        raise ValueError("endpoint URL must not contain a fragment")
+    path = p.path.rstrip("/")
+    # Pasted the full route? Drop it so we append once below.
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, path, "", ""))
+
+
+def _is_loopback(hostname: str | None) -> bool:
+    return (hostname or "").lower() in ("127.0.0.1", "::1", "localhost")
+
+
+def remote_warnings(remote: dict) -> list[str]:
+    """Human-facing safety notes for a configured remote endpoint.
+
+    Remote mode deliberately breaks the tool's core promise that nothing leaves
+    the machine, so the caller should surface these before the first request.
+    """
+    try:
+        url = normalize_endpoint_url(remote["base_url"])
+    except ValueError as e:
+        return [f"invalid remote endpoint: {e}"]
+    sp = urllib.parse.urlsplit(url)
+    loopback = _is_loopback(sp.hostname)
+    warns = []
+    if not loopback:
+        warns.append("remote endpoint: your request text leaves this machine")
+    if sp.scheme == "http" and not loopback:
+        if remote.get("api_key"):
+            warns.append("endpoint is plain HTTP; the API key and request travel unencrypted")
+        else:
+            warns.append("endpoint is plain HTTP; the request travels unencrypted")
+    return warns
+
+
+def _remote_post(base: str, model: str, api_key: str, body: dict,
+                 timeout: float = 120.0) -> list[tuple[str, object]]:
+    """POST a chat-completion to a remote OpenAI-compatible endpoint.
+
+    Bearer auth only when a key is given (a LAN llama-server needs none). The
+    response is buffered under the same _MAX_RESPONSE_BYTES cap as the local
+    server, and errors never include the API key.
+    """
+    url = normalize_endpoint_url(base) + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers=headers, method="POST")
+    opener = urllib.request.build_opener(_NoCrossOriginRedirect)
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            payload = _read_capped(r)
+    except urllib.error.HTTPError as e:
+        detail = _read_capped(e).decode("utf-8", "replace").strip()
+        # Error bodies are untrusted and may echo our request; keep it tiny.
+        if len(detail) > 200:
+            detail = detail[:200] + "..."
+        raise RuntimeError(f"endpoint returned HTTP {e.code}: {detail or e.reason}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"endpoint unreachable: {e.reason}") from None
+    try:
+        return _parse_choices(json.loads(payload))
+    except json.JSONDecodeError:
+        raise RuntimeError("endpoint returned non-JSON response") from None
+
+
+def list_remote_models(remote: dict, timeout: float = 5.0) -> list[str]:
+    """GET {base}/models. Used by doctor only; generation never guesses a model."""
+    url = normalize_endpoint_url(remote["base_url"]) + "/models"
+    headers = {}
+    if remote.get("api_key"):
+        headers["Authorization"] = f"Bearer {remote['api_key']}"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    opener = urllib.request.build_opener(_NoCrossOriginRedirect)
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            payload = _read_capped(r)
+    except urllib.error.HTTPError as e:
+        detail = _read_capped(e).decode("utf-8", "replace").strip()
+        if len(detail) > 200:
+            detail = detail[:200] + "..."
+        raise RuntimeError(f"endpoint returned HTTP {e.code}: {detail or e.reason}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"endpoint unreachable: {e.reason}") from None
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        raise RuntimeError("endpoint /models returned non-JSON") from None
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError("endpoint /models had no data list")
+    out = []
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            out.append(item["id"])
+    return out
+
+
+def _query_server(port: int, prompt: str, cfg: dict, n: int,
+                  system: str | None = None) -> list[str]:
+    """Greedy answer first, then sampled alternatives (see _greedy_then_sample).
+
+    The llama-specific penalties stay on the server body only -- they are what
+    the local model needs to avoid flag-spam loops, and remote endpoints do not
+    all accept them.
+    """
+    base = _std_body(system or cfg_mod.SYSTEM_PROMPT, prompt, cfg)
+    base["repeat_penalty"] = cfg.get("repeat_penalty", 1.08)
+    base["repeat_last_n"] = 64
+    return _greedy_then_sample(base, n, float(cfg.get("temperature", 0.0)),
+                               lambda b: _post(port, b))
+
+
+def _query_remote(remote: dict, prompt: str, cfg: dict, n: int,
+                  system: str | None = None) -> list[tuple[str, object]]:
+    """Query an OpenAI-compatible endpoint, greedy answer then alternatives.
+
+    Only broadly-supported fields go on the wire: model, messages, max_tokens,
+    stop, temperature, n, top_p. Llama-specific knobs (repeat penalties) are
+    local-only.
+
+    Alternatives are one temperature-sampled call each with n=1 rather than a
+    single call with n=N-1: llama-server commonly runs `--parallel 1`, which
+    rejects n > 1 outright (HTTP 400), and per-call sampling still yields
+    distinct candidates. A failed alternative is non-fatal -- the greedy answer
+    we already have is never lost.
+    """
+    base = _std_body(system or cfg_mod.SYSTEM_PROMPT, prompt, cfg)
+    base["model"] = remote["model"]
+    base["max_tokens"] = remote.get("max_tokens", base.get("max_tokens", 512))
+    greedy_temp = float(cfg.get("temperature", 0.0))
+    post = lambda b: _remote_post(remote["base_url"], remote["model"],
+                                  remote["api_key"], b,
+                                  timeout=remote.get("timeout", 120.0))
+    out = post({**base, "temperature": greedy_temp, "n": 1})
+    if n <= 1:
+        return out
+    sample_temp = max(0.6, greedy_temp)
+    for _ in range(n - 1):
+        if len(out) >= n:
+            break
+        try:
+            out += post({**base, "temperature": sample_temp,
+                         "n": 1, "top_p": 0.95})
+        except Exception:
+            pass  # alternatives are a bonus; never lose the greedy answer over them
     return out
 
 
@@ -407,9 +625,46 @@ def looks_degenerate(cmd: str, min_repeats: int = 4) -> bool:
     return bool(counts) and counts.most_common(1)[0][1] >= min_repeats
 
 
+def _collect_commands(raws) -> list[str]:
+    """Extract, drop bad/finished/duplicate candidates (shared by all modes)."""
+    cmds, seen = [], set()
+    for raw, finish in raws:
+        c = extract(raw)
+        if not c or c in seen:
+            continue
+        # A generation that stopped because it ran out of budget is not a
+        # finished command, and must not be presented as one. The observed case
+        # was `zip -r -9 -q -m -j -0 -1 -1 ...`: truncated mid-flag-spam, yet it
+        # still carried `-m`, which DELETES the source files. Showing that as an
+        # answer is worse than showing nothing.
+        if finish == "length" or looks_degenerate(c):
+            continue
+        seen.add(c)
+        cmds.append(c)
+    return cmds
+
+
 def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
              quiet: bool = False) -> tuple[list[str], float, str]:
-    """Return (commands, elapsed_seconds, mode). Commands are already extracted."""
+    """Return (commands, elapsed_seconds, mode). Commands are already extracted.
+
+    mode is one of "remote", "server", or "oneshot". Remote mode is selected by
+    a configured OpenAI-compatible base URL and needs no local model at all.
+    """
+    remote = cfg_mod.remote_config(cfg)
+    if remote is not None:
+        if not remote["model"]:
+            raise RuntimeError(
+                "remote endpoint configured but no model selected -- "
+                "set openai_model or WHATISIT_OPENAI_MODEL")
+        if force_oneshot:
+            raise RuntimeError(
+                "--oneshot applies to the local backend and cannot be used with a remote endpoint")
+        system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+        t0 = time.time()
+        raws = _query_remote(remote, user_msg, cfg, n, system=system)
+        return _collect_commands(raws), time.time() - t0, "remote"
+
     model = cfg_mod.find_model()
     if model is None:
         raise FileNotFoundError("no model found -- run `whatisit setup`")
@@ -443,18 +698,5 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system)
         mode = "oneshot"
 
-    cmds, seen = [], set()
-    for raw, finish in raws:
-        c = extract(raw)
-        if not c or c in seen:
-            continue
-        # A generation that stopped because it ran out of budget is not a
-        # finished command, and must not be presented as one. The observed case
-        # was `zip -r -9 -q -m -j -0 -1 -1 ...`: truncated mid-flag-spam, yet it
-        # still carried `-m`, which DELETES the source files. Showing that as an
-        # answer is worse than showing nothing.
-        if finish == "length" or looks_degenerate(c):
-            continue
-        seen.add(c)
-        cmds.append(c)
+    cmds = _collect_commands(raws)
     return cmds, time.time() - t0, mode
