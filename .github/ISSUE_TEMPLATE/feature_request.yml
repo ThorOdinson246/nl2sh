@@ -2,6 +2,15 @@ name: Feature request
 description: Suggest an improvement or a new capability for whatisit
 labels: ["enhancement"]
 body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I read the [README](https://github.com/ThorOdinson246/whatisit-nl2sh#readme)
+          required: true
+        - label: I searched open and closed issues for the same request
+          required: true
   - type: textarea
     id: problem
     attributes:
