@@ -2,6 +2,17 @@ name: Bug report
 description: Something in whatisit is broken or behaving unexpectedly
 labels: ["bug"]
 body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I read the [README](https://github.com/ThorOdinson246/whatisit-nl2sh#readme)
+          required: true
+        - label: I searched open and closed issues for the same problem
+          required: true
+        - label: I ran `whatisit doctor` and included the output below
+          required: true
   - type: textarea
     id: what-happened
     attributes:
