@@ -59,7 +59,10 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainer at CONTACT_EMAIL_PLACEHOLDER.
+reported privately through GitHub, at
+https://github.com/ThorOdinson246/whatisit-nl2sh/security/advisories/new.
+That form is labelled for security reports, but it is the private channel to
+the maintainer and conduct reports are welcome there too.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
