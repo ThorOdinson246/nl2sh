@@ -21,6 +21,10 @@ reviews:
   # comment text, none of it addressed to a human reader.
   enable_prompt_for_ai_agents: false
   estimate_code_review_effort: false
+  # Walkthrough chrome: the file list and status notices repeat what the PR
+  # page already shows, and each one is another section to expand.
+  changed_files_summary: false
+  review_status: false
   # The label taxonomy is maintained by hand; a bot should not write to it.
   auto_apply_labels: false
   suggested_reviewers: false
