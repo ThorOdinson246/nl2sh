@@ -746,8 +746,13 @@ WHOLE_DANGER = [
     # took 5.5s, and check() runs on every candidate before it is printed.
     (re.compile(r"\w{0,16}\(\s{0,4}\)\s{0,4}\{[^}]{0,64}\|[^}]{0,64}&\s{0,4}\}\s{0,4};"),
      "fork bomb"),
-    (re.compile(r"\bmkfs(\.\w+)?\b"), "formats a filesystem"),
-    (re.compile(r"\bdd\b[^|;]*\bof=/dev/(sd|nvme|hd|vd|mmcblk)"), "writes raw to a block device"),
+    # Only executable names are case-folded here. Options and subcommands stay
+    # case-sensitive, matching the programs' own parsers. This matters on
+    # case-insensitive filesystems (notably the default macOS setup), where
+    # `MKFS.EXT4` and `GIT reset` resolve to the lowercase executables.
+    (re.compile(r"\b(?i:mkfs(?:\.\w+)?)\b"), "formats a filesystem"),
+    (re.compile(r"\b(?i:dd)\b[^|;]*\bof=/dev/(sd|nvme|hd|vd|mmcblk)"),
+     "writes raw to a block device"),
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd|mmcblk)"), "redirects over a block device"),
     # Block-device destroyers other than dd/mkfs. All take the device as a
     # bare argument, so this is a verb + device-path match rather than a flag
@@ -755,15 +760,18 @@ WHOLE_DANGER = [
     # are as final as `mkfs` but none of the prior checks named them.
     (re.compile(r"\b(wipefs|blkdiscard|sgdisk)\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"),
      "wipes a block device"),
-    (re.compile(r"\bcryptsetup\b[^|;]*\b(luksFormat|luksErase|erase)\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"),
+    (re.compile(r"\b(?i:cryptsetup)\b[^|;]*\b(luksFormat|luksErase|erase)\b"
+                r"[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"),
      "reformats/erases a block device"),
-    (re.compile(r"\bparted\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)[^|;]*\b(rm|mklabel)\b"),
+    (re.compile(r"\b(?i:parted)\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"
+                r"[^|;]*\b(rm|mklabel)\b"),
      "modifies the partition table of a block device"),
-    (re.compile(r"\b(shutdown|reboot|halt|poweroff|init\s+0|init\s+6)\b"),
+    (re.compile(r"\b(?:(?i:shutdown|reboot|halt|poweroff)|(?i:init)\s+[06])\b"),
      "shuts the machine down"),
-    (re.compile(r"\bgit\s+clean\b(?=[^|;]*-\w*[fx])(?=[^|;]*-\w*[dx])"),
+    (re.compile(r"\b(?i:git)\s+clean\b(?=[^|;]*-\w*[fx])(?=[^|;]*-\w*[dx])"),
      "git clean deletes untracked files irrecoverably"),
-    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards uncommitted work"),
+    (re.compile(r"\b(?i:git)\s+reset\s+--hard\b"),
+     "git reset --hard discards uncommitted work"),
     (re.compile(r"\b(history\s+-c|shred\s+.*\.bash_history)\b"), "erases shell history"),
     (re.compile(r"\bchmod\b[^|;]*\s0{3,4}\s+/\s*$"), "chmod 000 / makes the system unusable"),
     (re.compile(r"\btruncate\s+-s\s*0\s+/etc/(passwd|shadow|fstab|sudoers)\b"),
@@ -801,13 +809,15 @@ WHOLE_DANGER = [
     # Removes the account's home directory and mail spool along with the user.
     # `deluser` is Debian's front-end for the same operation. Synonyms are
     # listed explicitly: matching one spelling of a tool is not coverage of it.
-    (re.compile(r"\b(?:userdel|deluser)\b[^|;]*\s--?(?:r\b|remove-home|remove-all-files)"),
+    (re.compile(r"\b(?i:userdel|deluser)\b[^|;]*\s"
+                r"--?(?:r\b|remove-home|remove-all-files)"),
      "deletes the user account together with its home directory and files"),
     # Flushing every chain drops the rules that were permitting your own SSH
     # session. On a remote host with a default DROP policy this is a permanent
     # lockout needing console access to undo, so it is worth refusing to
     # auto-run even though a local reset is legitimate.
-    (re.compile(r"\biptables\b[^|;]*\s-[FX]\b|\bnft\s+flush\s+ruleset\b"),
+    (re.compile(r"\b(?i:iptables)\b[^|;]*\s-[FX]\b"
+                r"|\b(?i:nft)\s+flush\s+ruleset\b"),
      "flushes firewall rules -- can lock you out of a remote machine"),
     # A truncating redirect (`>`, not `>>`) or a tee without -a over
     # authorized_keys removes the key you are currently logged in with.
@@ -1187,6 +1197,34 @@ def _is_code_interpreter(verb: str) -> bool:
 
 def _shell_command_string(verb: str, args: list[str]) -> str | None:
     """Return the string a supported shell will execute via `-c`, if any."""
+    if verb in {"csh", "tcsh"}:
+        # In csh/tcsh, -b and -n select the following word as a script file.
+        # Treating every later `c` in a short-option bundle as `-c` therefore
+        # produced false positives for `tcsh -b -c ...` and `tcsh -n -c ...`:
+        # those commands try to open a file literally named "-c".  -D carries
+        # an attached preprocessor definition whose value may also contain c.
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                return None
+            if arg == "-c":
+                return args[i + 1] if i + 1 < len(args) else None
+            if arg.startswith("-") and not arg.startswith("--"):
+                bundle = arg[1:]
+                if bundle.startswith("D"):
+                    i += 1
+                    continue
+                for option in bundle:
+                    if option in {"b", "n"}:
+                        return None
+                    if option == "c":
+                        return args[i + 1] if i + 1 < len(args) else None
+                i += 1
+                continue
+            return None
+        return None
+
     if verb == "fish":
         # fish uses getopt semantics: a required short-option argument may be
         # attached (`-Cecho`) or separate (`-C echo`).  Parse the bundle in

