@@ -16,6 +16,11 @@ reviews:
   poem: false
   in_progress_fortune: false
   sequence_diagrams: false
+  # Every inline finding otherwise carries a "Prompt for AI Agents" block
+  # restating it as instructions for a bot. Measured on one review: 42% of the
+  # comment text, none of it addressed to a human reader.
+  enable_prompt_for_ai_agents: false
+  estimate_code_review_effort: false
   # The label taxonomy is maintained by hand; a bot should not write to it.
   auto_apply_labels: false
   suggested_reviewers: false
