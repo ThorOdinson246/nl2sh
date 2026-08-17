@@ -125,7 +125,9 @@ WRAPPER_OPTIONAL_VALUE_OPTS = {
 
 # Shells that take a command as a STRING argument -- the string has to be
 # re-checked, or `bash -c "rm -rf /"` hides everything from the tokenizer.
-SHELL_RUNNERS = {"sh", "bash", "zsh", "ksh", "dash", "fish", "ash"}
+# csh/tcsh also execute stdin directly, so they belong to the remote-pipeline
+# interpreter check even when no -c operand is present.
+SHELL_RUNNERS = {"sh", "bash", "zsh", "ksh", "dash", "fish", "ash", "csh", "tcsh"}
 
 # Options that consume the following token while a shell is still parsing its
 # own arguments.  They must be skipped when looking for a later `-c`; the first
@@ -486,6 +488,17 @@ def _split_env_string(value: str) -> list[str] | None:
     return tokens
 
 
+def _executable_name(token: str) -> str:
+    """Return a comparison-safe executable basename.
+
+    The default macOS filesystems resolve executable paths case-insensitively,
+    so ``/bin/BASH`` runs the same program as ``/bin/bash`` there.  Every
+    semantic command dispatch must use the same normalization or a case variant
+    can skip wrapper stripping or recursive shell inspection.
+    """
+    return token.rsplit("/", 1)[-1].casefold()
+
+
 def _strip_command_prefixes(tokens: list[str]) -> list[str]:
     """Remove assignments, wrappers and wrapper options before a real command."""
     toks = list(tokens)
@@ -495,7 +508,7 @@ def _strip_command_prefixes(tokens: list[str]) -> list[str]:
                 and head.split("=", 1)[0].isidentifier()):
             toks = toks[1:]
             continue
-        base = head.rsplit("/", 1)[-1]
+        base = _executable_name(head)
         if base not in WRAPPERS:
             break
         toks = toks[1:]
@@ -1280,12 +1293,12 @@ def check(command: str) -> list[tuple[str, str]]:
         if any(toks and toks[0] == _UNPARSEABLE_WRAPPER_OPTION for toks in commands):
             findings.append(("DANGER", "abbreviated wrapper option could not be safely parsed"))
         for i, toks in enumerate(commands[:-1]):
-            if not toks or toks[0].rsplit("/", 1)[-1] not in {"curl", "wget"}:
+            if not toks or _executable_name(toks[0]) not in {"curl", "wget"}:
                 continue
             for downstream in commands[i + 1:]:
                 if not downstream:
                     continue
-                interpreter = downstream[0].rsplit("/", 1)[-1]
+                interpreter = _executable_name(downstream[0])
                 if _is_code_interpreter(interpreter):
                     why = ("pipes remote content straight into a shell"
                            if interpreter in SHELL_RUNNERS
@@ -1333,7 +1346,7 @@ def check(command: str) -> list[tuple[str, str]]:
                               " -- cannot verify what will run"))
             continue
 
-        verb = toks[0].rsplit("/", 1)[-1]
+        verb = _executable_name(toks[0])
 
         # `bash -c "<command>"` hides the whole command inside a string argument.
         # Shells accept option bundles, so `bash -lc` and `sh -xc` carry the same

