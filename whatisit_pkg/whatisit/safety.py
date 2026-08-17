@@ -86,13 +86,29 @@ WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "command",
 # (`-n19`, `--opt=val`, or a bare boolean flag) -- so the stripping loop can
 # skip exactly the tokens that belong to the wrapper and land on the real verb.
 WRAPPER_VALUE_OPTS = {
-    "sudo": {"-u", "-g", "-h", "-p", "-r", "-t", "-C"},
-    "doas": {"-u"},
-    "env": {"-u", "-C", "-S", "--split-string"},
-    "nice": {"-n"},
-    "ionice": {"-c", "-n", "-p", "-t"},
-    "stdbuf": {"-i", "-o", "-e"},
-    "xargs": {"-I", "-i", "-n", "-P", "-d", "-s", "-a", "-L", "-l"},
+    "sudo": {
+        "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+        "-r", "--role", "-t", "--type", "-C", "--close-from", "-D", "--chdir",
+        "-R", "--chroot", "-T", "--command-timeout", "-U", "--other-user",
+    },
+    "doas": {"-u", "-C"},
+    "env": {
+        "-a", "--argv0", "-u", "--unset", "-C", "--chdir",
+        "-S", "--split-string",
+    },
+    "nice": {"-n", "--adjustment"},
+    "ionice": {
+        "-c", "--class", "-n", "--classdata", "-p", "--pid",
+        "-P", "--pgid", "-u", "--uid",
+    },
+    "time": {"-f", "--format", "-o", "--output"},
+    "exec": {"-a"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "xargs": {
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-I", "--replace",
+        "-L", "--max-lines", "-n", "--max-args", "-P", "--max-procs",
+        "-s", "--max-chars", "--process-slot-var",
+    },
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
 }
 
@@ -328,7 +344,11 @@ def _strip_command_prefixes(tokens: list[str]) -> list[str]:
                         return [_UNPARSEABLE_ENV_SPLIT]
                     toks = split_tokens + toks
                     continue
-            if opt in value_opts and toks and not toks[0].startswith("-"):
+            # A required option argument is consumed even when it starts with
+            # '-'.  getopt/getopt_long do the same: treating such a value as a
+            # second option makes the checker inspect a different argv from the
+            # wrapper and can leave the value looking like the executable.
+            if opt in value_opts and toks:
                 toks = toks[1:]
         if toks and toks[0] == "--":
             toks = toks[1:]
