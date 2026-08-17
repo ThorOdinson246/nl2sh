@@ -23,6 +23,11 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # One review per push burns the hourly allowance fast: a single PR here
+    # arrived as 17 commits. Contributors can push freely; ask for a review
+    # with `@coderabbitai review` when the branch is ready to look at.
+    auto_incremental_review: false
+    auto_pause_after_reviewed_commits: 5
 
   path_instructions:
     - path: "whatisit_pkg/whatisit/safety.py"
