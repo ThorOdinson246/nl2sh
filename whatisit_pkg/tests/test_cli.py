@@ -170,7 +170,7 @@ class TestCmdQueryQuietDangerRefusal:
         monkeypatch.setattr(cli, "_is_windows", lambda: True)
         monkeypatch.setattr(
             cli.engine, "generate",
-            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False, for_execution=False:
                 (["ls -la"], 0.01, "server"))
         rc = cli.main(["-e", "list", "files"])
         assert rc == 7
@@ -182,7 +182,7 @@ class TestCmdQueryQuietDangerRefusal:
         monkeypatch.setattr(cli, "_is_windows", lambda: False)
         monkeypatch.setattr(
             cli.engine, "generate",
-            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False, for_execution=False:
                 (["ls -la"], 0.01, "server"))
         rc = cli.main(["-e", "list", "files"])
         assert rc != 7
@@ -280,7 +280,8 @@ class TestRemoteCli:
         monkeypatch.setenv("WHATISIT_OPENAI_BASE_URL", "http://192.0.2.8/v1")
         monkeypatch.setenv("WHATISIT_OPENAI_MODEL", "m")
 
-        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False):
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
             return (["ls"], 0.01, "remote")
 
         monkeypatch.setattr(cli.engine, "generate", fake_generate)
@@ -289,4 +290,3 @@ class TestRemoteCli:
         assert rc == 0
         assert captured.out.strip() == "ls"
         assert "leaves this machine" in captured.err
-

@@ -1152,10 +1152,24 @@ def _pipelines(command: str) -> list[list[str]]:
 
 
 def _is_code_interpreter(verb: str) -> bool:
-    return (verb in SHELL_RUNNERS
-            or verb in {"perl", "ruby", "node", "php", "luajit", "Rscript"}
-            or bool(re.fullmatch(
-                r"(?:python|pypy|lua|tclsh)(?:\d+(?:\.\d+)?)?", verb)))
+    """Recognize executable names that run source read from standard input.
+
+    Package managers commonly install version-suffixed names (``perl5.34``,
+    ``ruby3.2``, ``php8.3``), and macOS normally resolves executable paths
+    case-insensitively.  Match those real executable families without accepting
+    descriptive tools such as ``python-format`` or ``tclsh-helper``.
+    """
+    name = verb.casefold()
+    if name in SHELL_RUNNERS:
+        return True
+    return bool(re.fullmatch(
+        r"(?:python|pypy)(?:\d+(?:\.\d+)*m?)?"
+        r"|(?:ruby|lua|tclsh|rscript)(?:\d+(?:\.\d+)*)?"
+        r"|perl(?:\d+(?:\.\d+)*(?:-[a-z0-9_.+-]+)?)?"
+        r"|php(?:-cgi)?(?:\d+(?:\.\d+)*)?"
+        r"|node(?:js|\d+(?:\.\d+)*)?"
+        r"|luajit(?:-?\d+(?:\.\d+)*(?:-[a-z0-9_.+-]+)?)?",
+        name))
 
 
 def _shell_command_string(verb: str, args: list[str]) -> str | None:

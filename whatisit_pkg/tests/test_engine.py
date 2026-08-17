@@ -449,7 +449,11 @@ class _FakeResp:
         return self
 
     def __exit__(self, *a):
+        self.close()
         return False
+
+    def close(self):
+        self._exhausted = True
 
     def read(self, size=-1, *a, **k):
         # One-shot stream, like a real HTTP response body: emit the payload
@@ -655,7 +659,25 @@ class TestGenerateRemote:
     def _enable_remote(self, monkeypatch, remote):
         monkeypatch.setattr(cfg_mod, "remote_config", lambda cfg: remote)
         monkeypatch.setattr(engine.hostctx, "build",
-                            lambda p, enabled=True, cwd=None: ("SYS", p))
+                            lambda p, enabled=True, cwd=None, include_volatile=True: ("SYS", p))
+
+    @pytest.mark.parametrize("kwargs", [{"quiet": True}, {"for_execution": True}])
+    def test_remote_execution_paths_suppress_volatile_host_context(
+            self, monkeypatch, kwargs):
+        remote = self._remote()
+        monkeypatch.setattr(cfg_mod, "remote_config", lambda cfg: remote)
+        captured = {}
+
+        def capture_context(prompt, enabled=True, cwd=None, include_volatile=True):
+            captured["include_volatile"] = include_volatile
+            return ("SYS", prompt)
+
+        monkeypatch.setattr(engine.hostctx, "build", capture_context)
+        monkeypatch.setattr(engine, "_query_remote",
+                            lambda *a, **k: [("ls -la", "stop")])
+
+        engine.generate("list files", {}, **kwargs)
+        assert captured["include_volatile"] is False
 
     def test_remote_mode_needs_no_local_model(self, monkeypatch):
         self._enable_remote(monkeypatch, self._remote())

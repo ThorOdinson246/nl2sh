@@ -823,7 +823,7 @@ def _collect_commands(raws) -> list[str]:
 
 
 def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
-             quiet: bool = False) -> tuple[list[str], float, str]:
+             quiet: bool = False, for_execution: bool = False) -> tuple[list[str], float, str]:
     """Return (commands, elapsed_seconds, mode). Commands are already extracted.
 
     mode is one of "remote", "server", or "oneshot". Remote mode is selected by
@@ -838,7 +838,9 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         if force_oneshot:
             raise RuntimeError(
                 "--oneshot applies to the local backend and cannot be used with a remote endpoint")
-        system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+        system, user_msg = hostctx.build(
+            prompt, enabled=cfg.get("host_context", True),
+            include_volatile=not (for_execution or quiet))
         t0 = time.time()
         raws = _query_remote(remote, user_msg, cfg, n, system=system)
         return _collect_commands(raws), time.time() - t0, "remote"
