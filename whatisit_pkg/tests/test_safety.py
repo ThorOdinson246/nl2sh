@@ -124,6 +124,7 @@ MUST_FLAG_DANGER = [
     r"rm -rf $'\057\400ignored'",         # 0400 wraps to NUL before Bash builds argv
     "rm -rf $'/\\0\\\nignored'",         # escaped newline must not prevent ANSI-C decoding
     r"bash -c $'rm -rf /\0ignored'",
+    r'''echo "$'\x27'"; rm -rf /''',      # ANSI-C-like text inside double quotes is literal
     "sudo -u root rm -rf /",              # wrapper's OWN option, not just its name, was left unstripped
     "sudo --user root rm -rf /",
     "sudo --u root rm -rf /",             # sudo accepts unambiguous long-option abbreviations
@@ -282,6 +283,7 @@ MUST_BE_CLEAN_OF_DANGER = [
     "find . -type f -name '*.log' | xargs rm",   # ordinary root, not a critical one
     "rm -rf ~/downloads/old",             # '~/word' is an ordinary subpath, not '..' escaping it
     r"rm -rf $'/\0ignored'home/user/project/build",  # Bash target is the ordinary /home/... path
+    r'''rm -rf "$'\057'"''',              # ANSI-C syntax is literal inside double quotes
     "printf '%s' 'rm -rf \\\n/'",           # single quotes preserve the backslash and newline
     "printf '%s' $'rm -rf \\\n/'",           # Bash ANSI-C quotes preserve them too
     "'r\\\nm' -rf /",                     # a single-quoted command name is not joined

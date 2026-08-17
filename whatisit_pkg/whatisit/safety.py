@@ -279,6 +279,12 @@ def _decode_ansi_c(segment: str) -> str:
     the critical-path check entirely, while a real shell runs `rm -rf /`. This
     decodes the common backslash escapes and re-quotes the result with
     `shlex.quote` so the rest of the pipeline sees the same string bash would.
+
+    `$'...'` only has ANSI-C meaning when it begins outside ordinary quotes.
+    Inside `"..."` or `'...'`, Bash treats those characters as literal text.
+    Decoding them there can inject quote delimiters into the scanner and hide a
+    later top-level operator, so matches are selected with a small quote-aware
+    pass rather than a context-free regex substitution.
     """
     def repl(m: re.Match) -> str:
         body, out, i = m.group(1), [], 0
@@ -329,7 +335,56 @@ def _decode_ansi_c(segment: str) -> str:
         # `$'/\0ignored'suffix` becomes `/suffix`, exactly as Bash executes it.
         decoded = "".join(out).split("\x00", 1)[0]
         return shlex.quote(decoded)
-    return ANSI_C_QUOTE_RE.sub(repl, segment)
+
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if quote == '"':
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(segment):
+                # A backslash can protect a double-quote delimiter. Copy the
+                # pair without letting the second character alter our state.
+                out.append(segment[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < len(segment):
+            # An escaped dollar cannot begin ANSI-C quoting.
+            out.extend((ch, segment[i + 1]))
+            i += 2
+            continue
+        if ch == "'":
+            quote = "'"
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            quote = '"'
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "$" and (match := ANSI_C_QUOTE_RE.match(segment, i)):
+            out.append(repl(match))
+            i = match.end()
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _tokenize(segment: str) -> list[str]:
