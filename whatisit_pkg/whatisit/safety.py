@@ -90,11 +90,12 @@ WRAPPER_VALUE_OPTS = {
         "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
         "-r", "--role", "-t", "--type", "-C", "--close-from", "-D", "--chdir",
         "-R", "--chroot", "-T", "--command-timeout", "-U", "--other-user",
+        "-a", "--auth-type", "-c", "--login-class",
     },
-    "doas": {"-u", "-C"},
+    "doas": {"-u", "-C", "-a"},
     "env": {
         "-a", "--argv0", "-u", "--unset", "-C", "--chdir",
-        "-S", "--split-string",
+        "-S", "--split-string", "-P",
     },
     "nice": {"-n", "--adjustment"},
     "ionice": {
@@ -105,11 +106,21 @@ WRAPPER_VALUE_OPTS = {
     "exec": {"-a"},
     "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
     "xargs": {
-        "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-I", "--replace",
-        "-L", "--max-lines", "-n", "--max-args", "-P", "--max-procs",
-        "-s", "--max-chars", "--process-slot-var",
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-J", "-L",
+        "-n", "--max-args", "-P", "--max-procs",
+        "-R", "-S", "-s", "--max-chars", "--process-slot-var",
     },
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
+}
+
+# These long options accept an attached `=VALUE`, but a bare spelling does not
+# consume the next argv token.  In particular, GNU xargs treats bare
+# `--replace` as `--replace={}`; swallowing the following `rm` would hide the
+# command being run.  They still participate in abbreviation resolution so a
+# prefix cannot be mistaken for an unrelated boolean flag.
+WRAPPER_OPTIONAL_VALUE_OPTS = {
+    "sudo": {"--preserve-env"},
+    "xargs": {"-e", "-i", "-l", "--eof", "--replace", "--max-lines"},
 }
 
 # Shells that take a command as a STRING argument -- the string has to be
@@ -131,6 +142,7 @@ SHELL_VALUE_OPTS = {
 }
 
 _UNPARSEABLE_ENV_SPLIT = "__whatisit_unparseable_env_split__"
+_UNPARSEABLE_WRAPPER_OPTION = "__whatisit_unparseable_wrapper_option__"
 
 # Individual files whose destruction breaks the system. The directory list above
 # does not cover them, so `shred -u /etc/passwd` and `unlink /etc/passwd` were
@@ -152,7 +164,7 @@ def _strip_control(s: str) -> str:
     return CONTROL_RE.sub("", s)
 
 
-ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
 _ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"',
                    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v"}
 
@@ -180,7 +192,9 @@ def _decode_ansi_c(segment: str) -> str:
                     end = i + 2
                     while end < len(body) and end < i + 4 and body[end] in "01234567":
                         end += 1
-                    out.append(chr(int(body[i + 1:end], 8)))
+                    # Bash stores octal escapes as one byte: values above 0377
+                    # wrap modulo 256 (`\457` is `/`, `\400` is NUL).
+                    out.append(chr(int(body[i + 1:end], 8) & 0xFF))
                     i = end
                     continue
                 widths = {"x": 2, "u": 4, "U": 8}
@@ -207,7 +221,12 @@ def _decode_ansi_c(segment: str) -> str:
             else:
                 out.append(c)
                 i += 1
-        return shlex.quote("".join(out))
+        # Bash cannot put NUL in argv.  It truncates this ANSI-C fragment at
+        # the first decoded NUL, while adjacent shell word fragments still
+        # concatenate normally.  Truncate only this fragment before quoting so
+        # `$'/\0ignored'suffix` becomes `/suffix`, exactly as Bash executes it.
+        decoded = "".join(out).split("\x00", 1)[0]
+        return shlex.quote(decoded)
     return ANSI_C_QUOTE_RE.sub(repl, segment)
 
 
@@ -324,17 +343,62 @@ def _strip_command_prefixes(tokens: list[str]) -> list[str]:
             break
         toks = toks[1:]
         value_opts = WRAPPER_VALUE_OPTS.get(base, set())
-        while toks and toks[0] != "--" and toks[0].startswith("-"):
+        optional_value_opts = WRAPPER_OPTIONAL_VALUE_OPTS.get(base, set())
+        while toks:
+            # sudo alone permits environment assignments interspersed with its
+            # options and resumes option parsing afterwards.  If the assignment
+            # ended this loop, a later `-u root` would leave `root` looking like
+            # the executable and hide the actual command.
+            if (base == "sudo" and "=" in toks[0] and not toks[0].startswith(("-", "/"))
+                    and toks[0].split("=", 1)[0].isidentifier()):
+                toks = toks[1:]
+                continue
+            if toks[0] == "--" or not toks[0].startswith("-"):
+                break
             opt = toks[0]
             toks = toks[1:]
+            # sudo and GNU-style wrappers accept unambiguous abbreviations of
+            # long options.  Canonicalize a unique known value option before
+            # deciding whether to consume the following token; otherwise that
+            # value would look like the executable and hide the real command.
+            opt_name, separator, attached_value = opt.partition("=")
+            canonical_opt = opt_name
+            consumes_next = False
+            known_value_opts = value_opts | optional_value_opts
+            if opt_name.startswith("--") and opt_name not in known_value_opts:
+                matches = [full for full in known_value_opts
+                           if full.startswith("--") and full.startswith(opt_name)]
+                if len(matches) == 1:
+                    canonical_opt = matches[0]
+                elif len(matches) > 1:
+                    return [_UNPARSEABLE_WRAPPER_OPTION]
+            if canonical_opt in value_opts and not separator:
+                consumes_next = True
+
+            # A required short option can be the last member of a bundle.  In
+            # `sudo -Eu root ...`, `u` still consumes `root`; treating the whole
+            # bundle as self-contained leaves `root` looking like the command.
+            if opt.startswith("-") and not opt.startswith("--") and len(opt) > 2:
+                bundle = opt[1:]
+                for pos, letter in enumerate(bundle):
+                    short_opt = "-" + letter
+                    if short_opt in optional_value_opts:
+                        canonical_opt = short_opt
+                        attached_value = bundle[pos + 1:]
+                        consumes_next = False
+                        break
+                    if short_opt not in value_opts:
+                        continue
+                    canonical_opt = short_opt
+                    attached_value = bundle[pos + 1:]
+                    consumes_next = not bool(attached_value)
+                    break
             if base == "env":
                 split_value = None
-                if opt in {"-S", "--split-string"} and toks:
+                if canonical_opt in {"-S", "--split-string"} and attached_value:
+                    split_value = attached_value
+                elif canonical_opt in {"-S", "--split-string"} and consumes_next and toks:
                     split_value, toks = toks[0], toks[1:]
-                elif opt.startswith("-S") and opt != "-S":
-                    split_value = opt[2:]
-                elif opt.startswith("--split-string="):
-                    split_value = opt.split("=", 1)[1]
                 if split_value is not None:
                     # env inserts these words back into argv before choosing
                     # the program.  Discarding the value hides the executable
@@ -348,7 +412,7 @@ def _strip_command_prefixes(tokens: list[str]) -> list[str]:
             # '-'.  getopt/getopt_long do the same: treating such a value as a
             # second option makes the checker inspect a different argv from the
             # wrapper and can leave the value looking like the executable.
-            if opt in value_opts and toks:
+            if consumes_next and toks:
                 toks = toks[1:]
         if toks and toks[0] == "--":
             toks = toks[1:]
@@ -1040,6 +1104,8 @@ def check(command: str) -> list[tuple[str, str]]:
         commands = [_strip_command_prefixes(_tokenize(clause)) for clause in pipeline]
         if any(toks and toks[0] == _UNPARSEABLE_ENV_SPLIT for toks in commands):
             findings.append(("DANGER", "env -S string could not be safely parsed"))
+        if any(toks and toks[0] == _UNPARSEABLE_WRAPPER_OPTION for toks in commands):
+            findings.append(("DANGER", "abbreviated wrapper option could not be safely parsed"))
         for i, toks in enumerate(commands[:-1]):
             if not toks or toks[0].rsplit("/", 1)[-1] not in {"curl", "wget"}:
                 continue
@@ -1077,6 +1143,9 @@ def check(command: str) -> list[tuple[str, str]]:
             continue
         if toks[0] == _UNPARSEABLE_ENV_SPLIT:
             findings.append(("DANGER", "env -S string could not be safely parsed"))
+            continue
+        if toks[0] == _UNPARSEABLE_WRAPPER_OPTION:
+            findings.append(("DANGER", "abbreviated wrapper option could not be safely parsed"))
             continue
 
         # A command name produced by substitution (`$(echo rm) -rf /`) can
