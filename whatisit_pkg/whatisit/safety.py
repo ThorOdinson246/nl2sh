@@ -164,6 +164,108 @@ def _strip_control(s: str) -> str:
     return CONTROL_RE.sub("", s)
 
 
+def _normalize_shell_input(command: str) -> str:
+    r"""Apply quote/comment-aware pre-tokenization normalization.
+
+    POSIX shells delete an unquoted backslash followed by a newline before
+    recognizing words or operators.  The backslash keeps that meaning inside
+    double quotes, but both characters are literal inside single quotes.  Bash
+    ANSI-C quotes (``$'...'``) behave like the latter for a literal newline,
+    while still allowing an escaped quote inside the construct.
+
+    An unquoted ``#`` at the start of a word instead begins a comment.  Bash
+    treats backslashes as ordinary comment text, so its physical newline must
+    remain an operator rather than being joined to the comment.  Discarding the
+    comment itself also prevents its quote characters from confusing the
+    downstream, deliberately small shell scanner.
+
+    Keeping this pass quote-aware matters in both directions: joining
+    ``r\<newline>m`` is necessary to see the command Bash executes, while
+    joining either ``'r\<newline>m'`` or ``r\\<newline>m`` would inspect a
+    different command and create false positives.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    pending_dollar = False
+    word_start = True
+    i = 0
+
+    while i < len(command):
+        ch = command[i]
+
+        if quote == "single":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if quote == "ansi-c":
+            # ANSI-C quotes allow escaped quote delimiters.  Unlike an
+            # unquoted or double-quoted continuation, Bash preserves a
+            # backslash followed by a literal newline in this construct.
+            if ch == "\\" and i + 1 < len(command):
+                out.extend((ch, command[i + 1]))
+                i += 2
+                continue
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if quote is None and ch == "#" and word_start:
+            newline = command.find("\n", i + 1)
+            if newline < 0:
+                break
+            out.append("\n")
+            pending_dollar = False
+            word_start = True
+            i = newline + 1
+            continue
+
+        if ch == "\\" and i + 1 < len(command):
+            if command[i + 1] == "\n":
+                i += 2
+                continue
+            # Copy an escaped character as a pair so an escaped quote cannot
+            # accidentally change the state used for later continuations.
+            out.extend((ch, command[i + 1]))
+            pending_dollar = False
+            word_start = False
+            i += 2
+            continue
+
+        if quote == "double":
+            out.append(ch)
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+
+        if ch == "'":
+            quote = "ansi-c" if pending_dollar else "single"
+            pending_dollar = False
+            word_start = False
+        elif ch == '"':
+            quote = "double"
+            pending_dollar = False
+            word_start = False
+        elif ch == "$":
+            # Continuation removal can itself create a `$'...'` opener.  Pair
+            # consecutive dollars so `$$'...'` remains a PID expansion plus
+            # an ordinary single-quoted fragment, as Bash parses it.
+            pending_dollar = not pending_dollar
+            word_start = False
+        else:
+            pending_dollar = False
+            word_start = ch in " \t\n|&;()<>"
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
 ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
 _ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"',
                    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v"}
@@ -1083,7 +1185,7 @@ def check(command: str) -> list[tuple[str, str]]:
     """
     if not command or not command.strip():
         return []
-    clean = _strip_control(command)
+    clean = _normalize_shell_input(_strip_control(command))
     # Placeholders are documentation, not shell syntax: the `>` inside
     # `docker exec -it <container-id> sh` was once read as a redirect into /bin.
     scan = PLACEHOLDER_RE.sub("PLACEHOLDER", clean)
