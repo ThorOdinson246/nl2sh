@@ -37,6 +37,9 @@ runtime/lib/
 runtime/raw.txt
 scratch/
 
+# Nix build symlink.
+/result
+
 # Ollama models, wherever a script materializes them.
 ollama_models/
 *.ollama/
@@ -71,3 +74,7 @@ campaign/
 # Local-only git helpers. Referenced by nothing that ships.
 .gitmessage
 hooks/
+
+# pip build
+whatisit_pkg/build/
+whatisit_pkg/dist/

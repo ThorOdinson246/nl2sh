@@ -164,6 +164,29 @@ class TestCmdQueryQuietDangerRefusal:
         rc = cli.main(["-q"])
         assert rc == 0  # falls through to help, per main()'s "no words" branch
 
+    def test_refuse_execute_in_windows(self, monkeypatch, capsys):
+        # Patch the helper, not os.name: setting os.name="nt" on Linux makes
+        # Path.home() (via load_config in main) raise RuntimeError.
+        monkeypatch.setattr(cli, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            cli.engine, "generate",
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+                (["ls -la"], 0.01, "server"))
+        rc = cli.main(["-e", "list", "files"])
+        assert rc == 7
+        assert "disabled" in capsys.readouterr().err
+
+    def test_execute_is_not_refused_off_windows(self, monkeypatch, capsys):
+        # Without this, a _is_windows() stuck at True would pass the test above
+        # and silently disable -e everywhere.
+        monkeypatch.setattr(cli, "_is_windows", lambda: False)
+        monkeypatch.setattr(
+            cli.engine, "generate",
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+                (["ls -la"], 0.01, "server"))
+        rc = cli.main(["-e", "list", "files"])
+        assert rc != 7
+        assert "disabled" not in capsys.readouterr().err
 
 # ------------------------------------------------------------------ parser
 
@@ -221,3 +244,49 @@ def test_subcommand_word_inside_a_question_stays_a_question():
     a = cli.QueryArgs(["how", "do", "I", "stop", "a", "stuck", "process"])
     assert a.words[0] == "how"
     assert a.stray_flags == []
+
+
+class TestRemoteCli:
+    def _isolate(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        for suff in ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"):
+            for pref in ("WHATISIT_", "NL2SH_"):
+                monkeypatch.delenv(pref + suff, raising=False)
+
+    def test_config_redacts_api_key(self, monkeypatch, tmp_path, capsys):
+        self._isolate(monkeypatch, tmp_path)
+        rc = cli.main(["config", "--set",
+                       "openai_base_url=http://h/v1",
+                       "openai_api_key=sk-secret"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "sk-secret" not in out
+        assert "********" in out
+
+    def test_doctor_fails_without_model(self, monkeypatch, tmp_path, capsys):
+        self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli.engine, "list_remote_models", lambda remote: [])
+        rc = cli.main(["config", "--set", "openai_base_url=http://h/v1"])
+        assert rc == 0
+        rc = cli.main(["doctor"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Not ready" in out
+        assert "not set" in out
+
+    def test_query_warns_on_stderr_only(self, monkeypatch, tmp_path, capsys):
+        self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("WHATISIT_OPENAI_BASE_URL", "http://192.0.2.8/v1")
+        monkeypatch.setenv("WHATISIT_OPENAI_MODEL", "m")
+
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False):
+            return (["ls"], 0.01, "remote")
+
+        monkeypatch.setattr(cli.engine, "generate", fake_generate)
+        rc = cli.main(["-q", "list", "files"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.out.strip() == "ls"
+        assert "leaves this machine" in captured.err
+

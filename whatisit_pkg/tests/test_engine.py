@@ -9,6 +9,8 @@ import os
 import socket
 import stat
 import sys
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -434,3 +436,283 @@ class _FakeHostCtx:
     @staticmethod
     def build(prompt, enabled=True, cwd=None, include_volatile=True):
         return ("SYSTEM PROMPT", prompt)
+
+
+class _FakeResp:
+    """Stand-in for urllib's HTTPResponse: just a callable read()."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self._exhausted = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, size=-1, *a, **k):
+        # One-shot stream, like a real HTTP response body: emit the payload
+        # once, then EOF, so _read_capped()'s read loop terminates.
+        if self._exhausted:
+            return b""
+        self._exhausted = True
+        return self._payload
+
+
+class TestNormalizeEndpoint:
+    def test_trailing_slash_removed(self):
+        assert engine.normalize_endpoint_url("http://h:1/v1/") == "http://h:1/v1"
+
+    def test_full_route_stripped(self):
+        assert (engine.normalize_endpoint_url("http://h:1/v1/chat/completions/") ==
+                "http://h:1/v1")
+
+    def test_preserves_path_prefix(self):
+        assert (engine.normalize_endpoint_url("https://ex.com/llm/v1/") ==
+                "https://ex.com/llm/v1")
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValueError, match="empty"):
+            engine.normalize_endpoint_url("")
+
+    def test_non_http_rejected(self):
+        with pytest.raises(ValueError, match="http"):
+            engine.normalize_endpoint_url("ftp://h/")
+
+    def test_embedded_credentials_rejected(self):
+        with pytest.raises(ValueError, match="credentials"):
+            engine.normalize_endpoint_url("http://u:p@h/v1")
+
+    def test_fragment_rejected(self):
+        with pytest.raises(ValueError, match="fragment"):
+            engine.normalize_endpoint_url("http://h/v1#frag")
+
+    def test_no_host_rejected(self):
+        with pytest.raises(ValueError, match="no host"):
+            engine.normalize_endpoint_url("http:///v1")
+
+
+class TestParseChoices:
+    def test_ok(self):
+        assert engine._parse_choices(
+            {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}
+        ) == [("x", "stop")]
+
+    def test_missing_choices(self):
+        with pytest.raises(RuntimeError, match="no choices"):
+            engine._parse_choices({})
+
+    def test_non_string_content_skipped(self):
+        r = {"choices": [{"message": {"content": None}},
+                         {"message": {"content": "ok"}, "finish_reason": "stop"}]}
+        assert engine._parse_choices(r) == [("ok", "stop")]
+
+    def test_no_usable_choices(self):
+        with pytest.raises(RuntimeError, match="no usable"):
+            engine._parse_choices({"choices": [{"message": {"content": None}}]})
+
+
+class TestRemotePost:
+    """_remote_post(): the HTTP layer, with urllib fully mocked."""
+
+    def _fake_opener(self, resp):
+        class _Opener:
+            def __init__(self, r):
+                self.r = r
+
+            def open(self, req, **kw):
+                self.req, self.kw = req, kw
+                return self.r
+
+        o = _Opener(resp)
+        return o
+
+    def test_sends_bearer_and_parses(self, monkeypatch):
+        import json
+        payload = json.dumps({"choices": [{"message": {"content": "ls -la"},
+                                            "finish_reason": "stop"}]}).encode()
+        opener = self._fake_opener(_FakeResp(payload))
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *a: opener)
+        out = engine._remote_post("http://h:1/v1/", "m", "secret", {"model": "m"})
+        assert out == [("ls -la", "stop")]
+        req = opener.req
+        assert req.full_url == "http://h:1/v1/chat/completions"
+        assert req.get_method() == "POST"
+        assert req.get_header("Authorization") == "Bearer secret"
+        assert json.loads(req.data)["model"] == "m"
+
+    def test_no_authorization_header_when_keyless(self, monkeypatch):
+        opener = self._fake_opener(_FakeResp(b'{"choices":[]}'))
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *a: opener)
+        with pytest.raises(RuntimeError, match="no usable"):
+            engine._remote_post("http://h:1/v1", "m", "", {})
+        assert opener.req.get_header("Authorization") is None
+
+    def test_http_error_message_no_secret(self, monkeypatch):
+        import urllib.error
+        err = urllib.error.HTTPError("http://h:1/v1/chat/completions", 401,
+                                     "Unauthorized", {}, _FakeResp(b"invalid key"))
+
+        def boom(*a, **k):
+            raise err
+
+        class _Bad:
+            open = staticmethod(boom)
+
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *a: _Bad())
+        with pytest.raises(RuntimeError) as ei:
+            engine._remote_post("http://h:1/v1", "m", "sekrit-key", {})
+        assert "401" in str(ei.value)
+        assert "sekrit-key" not in str(ei.value)
+
+    def test_non_json_response(self, monkeypatch):
+        opener = self._fake_opener(_FakeResp(b"<html>proxy error</html>"))
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *a: opener)
+        with pytest.raises(RuntimeError, match="non-JSON"):
+            engine._remote_post("http://h:1/v1", "m", "", {})
+
+    def test_no_cross_origin_redirect_handler(self):
+        h = engine._NoCrossOriginRedirect()
+        req = urllib.request.Request("http://h:1/v1/chat/completions",
+                                     data=b"{}", method="POST")
+        # Refuses a redirect to a different authority.
+        assert h.redirect_request(req, None, 302, "Found", {},
+                                  "http://evil:9/steal") is None
+
+    def test_list_remote_models(self, monkeypatch):
+        opener = self._fake_opener(_FakeResp(b'{"data":[{"id":"a"},{"id":"b"}]}'))
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *a: opener)
+        names = engine.list_remote_models({"base_url": "http://h:1/v1", "api_key": ""})
+        assert names == ["a", "b"]
+        assert opener.req.full_url == "http://h:1/v1/models"
+        assert opener.req.get_method() == "GET"
+
+
+class TestQueryRemote:
+    REMOTE = {"base_url": "http://h/v1", "model": "m", "api_key": "",
+              "timeout": 120.0, "max_tokens": 512}
+
+    def test_greedy_then_separate_sampled_calls(self, monkeypatch):
+        calls = []
+
+        def fake_post(base, model, key, body, timeout=120.0):
+            calls.append((body.get("temperature"), body.get("n")))
+            return [(f"cmd{len(calls)}", "stop")]
+
+        monkeypatch.setattr(engine, "_remote_post", fake_post)
+        out = engine._query_remote(self.REMOTE, "prompt",
+                                   {"temperature": 0.2}, n=3, system="S")
+        assert [c for c, _ in out] == ["cmd1", "cmd2", "cmd3"]
+        assert calls[0] == (0.2, 1)
+        assert calls[1] == calls[2] == (max(0.6, 0.2), 1)  # never uses n>1
+
+    def test_single_candidate_skips_sampling(self, monkeypatch):
+        calls = []
+
+        def fake_post(*a, **k):
+            calls.append(1)
+            return [("cmd", "stop")]
+
+        monkeypatch.setattr(engine, "_remote_post", fake_post)
+        engine._query_remote(self.REMOTE, "p", {}, n=1, system="S")
+        assert calls == [1]
+
+    def test_sampled_failure_keeps_greedy(self, monkeypatch):
+        state = {"i": 0}
+
+        def fake_post(*a, **k):
+            state["i"] += 1
+            if state["i"] > 1:
+                raise RuntimeError("boom")
+            return [("cmd", "stop")]
+
+        monkeypatch.setattr(engine, "_remote_post", fake_post)
+        out = engine._query_remote(self.REMOTE, "p", {}, n=3, system="S")
+        assert out == [("cmd", "stop")]
+
+    def test_passes_model_max_tokens_and_key(self, monkeypatch):
+        seen = {}
+
+        def fake_post(base, model, key, body, timeout=120.0):
+            seen.update(base=base, model=model, key=key, body=body, to=timeout)
+            return [("c", "stop")]
+
+        monkeypatch.setattr(engine, "_remote_post", fake_post)
+        engine._query_remote({**self.REMOTE, "api_key": "K", "timeout": 30.0,
+                              "max_tokens": 1024}, "p", {}, n=1, system="S")
+        assert seen["model"] == "m" and seen["key"] == "K"
+        assert seen["body"]["model"] == "m"
+        assert seen["body"]["max_tokens"] == 1024
+        assert seen["to"] == 30.0
+
+
+class TestGenerateRemote:
+    def _remote(self, **over):
+        return {"base_url": "http://h/v1", "model": "m", "api_key": "",
+                "timeout": 120.0, "max_tokens": 512, **over}
+
+    def _enable_remote(self, monkeypatch, remote):
+        monkeypatch.setattr(cfg_mod, "remote_config", lambda cfg: remote)
+        monkeypatch.setattr(engine.hostctx, "build",
+                            lambda p, enabled=True, cwd=None: ("SYS", p))
+
+    def test_remote_mode_needs_no_local_model(self, monkeypatch):
+        self._enable_remote(monkeypatch, self._remote())
+        monkeypatch.setattr(cfg_mod, "find_model", lambda: None)
+        monkeypatch.setattr(engine, "_query_remote",
+                            lambda *a, **k: [("ls -la", "stop")])
+        cmds, elapsed, mode = engine.generate("list files", {})
+        assert cmds == ["ls -la"]
+        assert mode == "remote"
+
+    def test_remote_missing_model_raises(self, monkeypatch):
+        self._enable_remote(monkeypatch, self._remote(model=None))
+        with pytest.raises(RuntimeError, match="no model selected"):
+            engine.generate("list files", {})
+
+    def test_remote_oneshot_incompatible(self, monkeypatch):
+        self._enable_remote(monkeypatch, self._remote())
+        with pytest.raises(RuntimeError, match="oneshot"):
+            engine.generate("list files", {}, force_oneshot=True)
+
+    def test_remote_drops_length_finish(self, monkeypatch):
+        self._enable_remote(monkeypatch, self._remote())
+        monkeypatch.setattr(engine, "_query_remote",
+                            lambda *a, **k: [("ls -la", "length"), ("pwd", "stop")])
+        cmds, _, _ = engine.generate("list files", {})
+        assert cmds == ["pwd"]
+
+    def test_remote_dedups_candidates(self, monkeypatch):
+        self._enable_remote(monkeypatch, self._remote())
+        monkeypatch.setattr(engine, "_query_remote",
+                            lambda *a, **k: [("ls", "stop"), ("ls", "stop")])
+        cmds, _, mode = engine.generate("list files", {}, n=2)
+        assert cmds == ["ls"]
+        assert mode == "remote"
+
+
+class TestRemoteWarnings:
+    def test_warns_request_leaves_machine(self):
+        w = engine.remote_warnings({"base_url": "https://api.example.com/v1",
+                                    "api_key": ""})
+        assert any("leaves this machine" in x for x in w)
+
+    def test_http_with_key_warns_cleartext(self):
+        w = engine.remote_warnings({"base_url": "http://remote.example.com/v1",
+                                    "api_key": "k"})
+        assert any("unencrypted" in x for x in w)
+
+    def test_no_warning_for_local_loopback(self):
+        w = engine.remote_warnings({"base_url": "http://127.0.0.1:8080/v1",
+                                    "api_key": ""})
+        assert w == []
+
+    def test_https_loopback_does_not_claim_data_leaves(self):
+        w = engine.remote_warnings({"base_url": "https://localhost:8443/v1",
+                                    "api_key": ""})
+        assert w == []
+
+    def test_invalid_url_reported(self):
+        w = engine.remote_warnings({"base_url": "not-a-url", "api_key": ""})
+        assert any("invalid" in x for x in w)

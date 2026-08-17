@@ -1,7 +1,7 @@
 # whatisit-nl2sh
 
-Ask for a shell command in plain English. Runs on your own machine, on CPU.
-No GPU, no API key, no network. Answers in about a second.
+Ask for a shell command in plain English. Runs on your own machine by default,
+on CPU. No GPU, no API key, no network. Answers in about a second.
 
 ![whatisit in use](whatisit.gif)
 
@@ -17,9 +17,9 @@ $ whatisit delete everything in the root directory
 rm -rf /
 ```
 
-The model is 941 MB and runs through `llama.cpp`. Nothing you type leaves the
-machine, so it works offline, and on boxes where piping shell context to a
-cloud API isn't allowed.
+The model is 941 MB and runs through `llama.cpp`. By default nothing you type
+leaves the machine, so it works offline, and on boxes where piping shell context
+to a cloud API isn't allowed.
 
 ## Install
 
@@ -66,11 +66,9 @@ it, or use `huggingface-cli download` with the same arguments.
 
 **3. A llama.cpp build.** Grab the release archive for your platform from
 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) and unzip
-it. You need `llama-server` (and `llama-cli` for the fallback path). Those
-builds need glibc 2.34 or newer; on an older distro build from source, or let
-`whatisit setup` fetch the compatibility build for you. If you'd rather build
-from source or already have it via Homebrew, that's fine too, just note where
-`llama-server` ended up.
+it. You need `llama-server` (and `llama-cli` for the fallback path). These
+builds need glibc 2.34 or newer. Building from source or installing via
+Homebrew works too, just note where `llama-server` ended up.
 
 **4. Point whatisit at both.**
 
@@ -83,6 +81,16 @@ whatisit doctor
 `doctor` tells you which of the three pieces is missing if something's off.
 
 Python 3.9+, Linux or macOS. The CLI has no dependencies of its own.
+
+### Nix
+
+```bash
+nix run github:ThorOdinson246/whatisit-nl2sh -- setup
+nix profile install github:ThorOdinson246/whatisit-nl2sh
+```
+
+The flake wires in `llama.cpp` from nixpkgs, so `setup` only fetches the model.
+On NixOS, add the flake to your inputs and pull `packages.<system>.default`.
 
 ## Use
 
@@ -114,6 +122,22 @@ whatisit -e remove every .pyc file under this tree
 `whatisit stop` shuts down the resident model server. `whatisit config --set threads=4`
 changes settings.
 
+## Remote endpoints
+
+To use a hosted API, Ollama, or a `llama.cpp` server you already have running:
+
+```bash
+whatisit config --set openai_base_url=http://127.0.0.1:8080/v1 openai_model=your-model-name
+export WHATISIT_OPENAI_API_KEY=sk-...   # optional; prefer env over the config file
+```
+
+`openai_model` is required. Empty `WHATISIT_OPENAI_BASE_URL=` (or
+`openai_base_url=`) returns to local mode. Extra knobs: `openai_timeout`
+(default 120 s) and `openai_max_tokens` (default 512, for reasoning models).
+
+This sends your request off the machine, so it is opt-in and whatisit prints a
+warning to stderr on every remote call. Prefer `https://`.
+
 ## How it works
 
 First call starts a small `llama.cpp` server and leaves it resident, so later
@@ -123,14 +147,14 @@ Numbers from a laptop, an Intel i5-11320H with 4 cores, using 4 threads:
 
 | | |
 |---|---|
-| generation | 31.9 tok/s |
+| generation | 39.5 tok/s |
 | answer latency, warm | 0.59s median over 12 queries |
 | cold start | 2.1s |
 | resident memory | 1.6 GB |
 
-Nothing here needs a GPU or a big machine. It's a 1.5B at Q4_K_M, so what
-matters is how many threads you give it, not what they're in. Decoding is
-greedy at temperature 0, so the same question always gives the same command.
+It's a 1.5B at Q4_K_M, so what matters is how many threads you give it, not
+what they're in. Decoding is greedy at temperature 0, so the same question
+always gives the same command.
 
 ## Training setup
 
@@ -188,7 +212,7 @@ if you'd rather have accuracy than speed.
 | size on disk | 941 MB | 1.9 GB |
 | pass rate | 0.620 | **0.657** |
 | generation | 39.5 tok/s | 17.3 tok/s |
-| peak RAM | ~1.8 GB | ~3.4 GB |
+| resident memory | 1.6 GB | ~3.4 GB |
 | cold start | ~2 s | ~4 s |
 
 The 3B is +4.0 points, and where it wins is the useful part. Split by the
@@ -222,8 +246,7 @@ slot and, in brackets, the file that slot actually points at.
 ## What it gets wrong
 
 This is still in development and will get things wrong. It assumes you know
-your way around a terminal well enough to read a command before running it and
-fix it if it's off.
+your way around a terminal well enough to spot a bad command and fix it.
 
 - Single-turn. No memory of your last command, no shell state.
 - Output caps at 64 tokens. That's a command, not a script.

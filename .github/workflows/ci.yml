@@ -65,6 +65,25 @@ jobs:
           python -c "import whatisit, whatisit.cli, whatisit.engine, whatisit.safety"
           python -m whatisit --help > /dev/null
 
+  nix:
+    name: nix (flake builds)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+
+      # buildPythonApplication runs pytest inside the build, so this covers
+      # both "the flake evaluates" and "the package works".
+      - name: Build the flake
+        run: nix build .#whatisit
+
+      - name: Run the built binary
+        run: ./result/bin/whatisit --help
+
   package:
     name: package (build, metadata, wheel + sdist install)
     runs-on: ubuntu-latest
