@@ -906,7 +906,7 @@ WHOLE_DANGER = [
     # `curl ... | python3 -` and `curl ... | perl` execute attacker-chosen code
     # exactly as completely.
     (re.compile(r"\b(?:curl|wget)\b[^|;]{0,200}\|\s{0,4}(?:sudo\s+)?"
-                r"(?:python\d?(?:\.\d+)?|perl|ruby|node|php)\b"),
+                r"(?:python\d?(?:\.\d+)?|perl|ruby|node|php)(?![\w.-])"),
      "pipes remote content straight into an interpreter"),
     # Process substitution and eval reach the same place without ever forming
     # a pipe, which is why the pipe-shaped rule above cannot see them.
@@ -1097,8 +1097,10 @@ def _pipelines(command: str) -> list[list[str]]:
 
 
 def _is_code_interpreter(verb: str) -> bool:
-    return (verb in SHELL_RUNNERS or verb in {"perl", "ruby", "node", "php"}
-            or bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", verb)))
+    return (verb in SHELL_RUNNERS
+            or verb in {"perl", "ruby", "node", "php", "luajit", "Rscript"}
+            or bool(re.fullmatch(
+                r"(?:python|pypy|lua|tclsh)(?:\d+(?:\.\d+)?)?", verb)))
 
 
 def _shell_command_string(verb: str, args: list[str]) -> str | None:
