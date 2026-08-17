@@ -1,0 +1,88 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# Only settings that differ from the defaults are listed. The point of this
+# file is path_instructions: without them the bot reviews a shell-command
+# generator the same way it would review a web app.
+language: "en-US"
+tone_instructions: >-
+  Direct and technical. Cite file and line. Prefer one concrete failing input
+  over general advice. Say plainly when a claim in the PR description is not
+  supported by the diff.
+
+reviews:
+  # Default is "chill", which holds back borderline findings. This project
+  # takes patches that reach a shell, so surface them.
+  profile: "assertive"
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  # The label taxonomy is maintained by hand; a bot should not write to it.
+  auto_apply_labels: false
+  suggested_reviewers: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_instructions:
+    - path: "whatisit_pkg/whatisit/safety.py"
+      instructions: |
+        A denylist standing between model output and a shell. Flag anything
+        that removes, weakens or narrows an existing rule. Every new pattern
+        needs a matching case in tests/test_safety.py.
+        Look for bypasses: quoting, ANSI-C strings, wrappers (bash -c, eval,
+        env, timeout), path-qualified and version-suffixed interpreters, and
+        case folding.
+        This runs on every generated command, so flag regexes that can
+        backtrack pathologically.
+
+    - path: "whatisit_pkg/whatisit/extract.py"
+      instructions: |
+        Model output is untrusted and is printed to a terminal. Flag any path
+        where such text reaches stdout without control-character stripping.
+
+    - path: "whatisit_pkg/whatisit/engine.py"
+      instructions: |
+        Runs a local model server with a bearer token over a UNIX socket.
+        Flag secrets passed as command-line arguments, since argv is readable
+        by any local user via ps. Flag files created without an explicit mode,
+        TOCTOU races on socket paths or ports, and unbounded reads from a
+        socket or HTTP response.
+
+    - path: "whatisit_pkg/whatisit/hostctx.py"
+      instructions: |
+        host_context is off by default because it measured 54.2% -> 45.1%
+        (p=0.0004) on InterCode-ALFA. Any change claiming to improve accuracy
+        must cite benchmark numbers rather than assert an improvement.
+        Filenames and git state are untrusted input and must be encoded as
+        data, never as instructions.
+
+    - path: "whatisit_pkg/whatisit/cli.py"
+      instructions: |
+        Every new flag must be registered in build_parser() so it appears in
+        --help. Flag any config key the CLI writes that no other code reads.
+        The execute confirmation prompt is safety-relevant: flag any change
+        that makes running a command easier to trigger.
+
+    - path: "whatisit_pkg/tests/**"
+      instructions: |
+        Flag tests that assert only on substrings or mock return values
+        without exercising real behaviour. Asserting that a string appears in
+        a generated config does not test that the feature works.
+        Minimum supported Python is 3.9; flag syntax or stdlib usage newer
+        than that.
+
+  # The comments in this codebase explain why, not what. Generated docstrings
+  # dilute that, so they stay off.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+chat:
+  art: false
+
+knowledge_base:
+  learnings:
+    scope: "local"
