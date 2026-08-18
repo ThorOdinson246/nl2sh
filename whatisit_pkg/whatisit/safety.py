@@ -1120,8 +1120,18 @@ def _split_top_level(command: str) -> list[tuple[str, str | None]]:
             continue
 
         # `>|` is one force-clobber redirect token, not a redirect followed by
-        # a pipeline. Keep its pipe with the current clause.
+        # a pipeline. Keep its pipe with the current clause. The same applies
+        # to `>&`, `<&`, and `&>`: the `&` belongs to the redirection operator,
+        # not to a background/AND-list separator.
         if ch == "|" and current and current[-1] == ">":
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "&" and current and current[-1] in "><":
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "&" and i + 1 < len(command) and command[i + 1] == ">":
             current.append(ch)
             i += 1
             continue
