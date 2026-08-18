@@ -226,9 +226,11 @@ class TestTcpServerIdentity:
     def test_alive_authenticates_after_connection_owner_check(self, monkeypatch, tmp_path):
         monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
         events = []
+        statuses = iter((401, 200))
 
         class Response:
-            status = 200
+            def __init__(self):
+                self.status = next(statuses)
 
             @staticmethod
             def read(_size=-1):
@@ -268,9 +270,80 @@ class TestTcpServerIdentity:
         assert events == [
             "connect",
             "owner",
-            ("request", "GET", "/v1/models", "Bearer secret-token"),
+            ("request", "GET", "/props", "Bearer secret-token.invalid"),
+            "close",
+            "connect",
+            "owner",
+            ("request", "GET", "/props", "Bearer secret-token"),
             "close",
         ]
+
+    def test_alive_authenticates_unix_socket(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        socket_path = tmp_path / "data" / "run" / "server.sock"
+        socket_path.parent.mkdir(parents=True)
+        socket_path.touch()
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        events = []
+        statuses = iter((401, 200))
+
+        class Response:
+            def __init__(self):
+                self.status = next(statuses)
+
+            @staticmethod
+            def read(_size=-1):
+                return b""
+
+        class Connection:
+            @staticmethod
+            def request(method, endpoint, body=None, headers=None):
+                events.append((method, endpoint, headers.get("Authorization")))
+
+            @staticmethod
+            def getresponse():
+                return Response()
+
+            @staticmethod
+            def close():
+                events.append("close")
+
+        monkeypatch.setattr(engine, "_UnixHTTPConnection", lambda *a, **k: Connection())
+
+        assert engine._alive() is True
+        assert events == [
+            ("GET", "/props", "Bearer secret-token.invalid"),
+            "close",
+            ("GET", "/props", "Bearer secret-token"),
+            "close",
+        ]
+
+    def test_alive_rejects_endpoint_that_does_not_enforce_authentication(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        calls = []
+
+        def fake_probe(endpoint, token, port, expected_pid, timeout):
+            calls.append((endpoint, token))
+            return 200
+
+        monkeypatch.setattr(engine, "_probe_status", fake_probe)
+
+        assert engine._alive(43210, expected_pid=1234) is False
+        assert calls == [("/props", "secret-token.invalid")]
+
+    def test_alive_rejects_invalid_configured_token(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        statuses = iter((401, 401))
+        monkeypatch.setattr(engine, "_probe_status", lambda *args: next(statuses))
+
+        assert engine._alive(43210, expected_pid=1234) is False
 
     def test_alive_never_sends_token_when_connection_owner_differs(
             self, monkeypatch, tmp_path):

@@ -354,31 +354,47 @@ def _verified_tcp_request(port: int, expected_pid: int, endpoint: str,
         conn.close()
 
 
+def _probe_status(endpoint: str, token: str, port: int | None,
+                  expected_pid: int | None, timeout: float) -> int | None:
+    """Return an authenticated GET's status over the configured transport."""
+    headers = {"Authorization": f"Bearer {token}"}
+    sp = _sock_path()
+    if sp.exists():
+        conn = _UnixHTTPConnection(str(sp), timeout=timeout)
+        try:
+            conn.request("GET", endpoint, headers=headers)
+            response = conn.getresponse()
+            _read_capped(response)
+            return response.status
+        finally:
+            conn.close()
+    if port is None or expected_pid is None:
+        return None
+    status, _ = _verified_tcp_request(
+        port, expected_pid, endpoint, headers=headers, timeout=timeout)
+    return status
+
+
 def _alive(port: int | None = None, timeout: float = 0.6,
            expected_pid: int | None = None) -> bool:
     sp = _state_dir() / "server.sock"
-    if sp.exists():
-        try:
-            # /health is deliberately public in llama-server. Probe an
-            # authenticated endpoint so a stale endpoint cannot count as ours.
-            _request("/v1/models", timeout=timeout)
-            return True
-        except Exception:
+    if not sp.exists():
+        if port is None:
             return False
-    if port is None:
-        return False
-    if not _can_inspect_sockets():
-        raise RuntimeError(_TCP_INSPECTION_ERROR)
-    if expected_pid is None or not _pid_owns_tcp_port(expected_pid, port):
-        return False
+        if not _can_inspect_sockets():
+            raise RuntimeError(_TCP_INSPECTION_ERROR)
+        if expected_pid is None or not _pid_owns_tcp_port(expected_pid, port):
+            return False
     token = _read_token()
     if not token:
         return False
     try:
-        status, _ = _verified_tcp_request(
-            port, expected_pid, "/v1/models",
-            headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
-        return status == 200
+        # /health and /v1/models are public in llama-server. /props is
+        # side-effect-free and protected, so require proof that authentication
+        # is both enforced and accepts the configured token.
+        wrong_token = f"{token}.invalid"
+        return (_probe_status("/props", wrong_token, port, expected_pid, timeout) == 401
+                and _probe_status("/props", token, port, expected_pid, timeout) == 200)
     except Exception:
         return False
 
