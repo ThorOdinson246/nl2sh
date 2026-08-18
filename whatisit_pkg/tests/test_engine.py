@@ -181,6 +181,40 @@ class TestTcpServerIdentity:
                 assert engine._pid_owns_tcp_connection(
                     os.getpid(), server_port, client.getsockname()[1]) is True
 
+    def test_connection_owner_wait_is_capped(self, monkeypatch):
+        times = iter((10.0, 10.0 + engine._OWNER_WAIT_MAX))
+        monkeypatch.setattr(engine.time, "monotonic", lambda: next(times))
+        monkeypatch.setattr(engine.time, "sleep", lambda _delay: pytest.fail("slept past cap"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+        monkeypatch.setattr(engine, "_pid_owns_tcp_connection", lambda *args: False)
+
+        assert engine._wait_for_tcp_connection_owner(1234, 43210, 54321, 120.0) is False
+
+    def test_connection_owner_wait_fails_immediately_without_inspection(
+            self, monkeypatch):
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+        monkeypatch.setattr(
+            engine, "_pid_owns_tcp_connection",
+            lambda *args: pytest.fail("ownership check should not run"))
+
+        assert engine._wait_for_tcp_connection_owner(1234, 43210, 54321, 120.0) is False
+
+    def test_verified_request_names_missing_socket_inspection(self, monkeypatch):
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+        monkeypatch.setattr(
+            engine.http.client, "HTTPConnection",
+            lambda *args, **kwargs: pytest.fail("connection should not be opened"))
+
+        with pytest.raises(RuntimeError, match="requires /proc or lsof"):
+            engine._verified_tcp_request(43210, 1234, "/v1/models")
+
+    def test_alive_propagates_missing_socket_inspection(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+
+        with pytest.raises(RuntimeError, match="requires /proc or lsof"):
+            engine._alive(43210, expected_pid=1234)
+
     def test_alive_does_not_send_token_to_wrong_pid(self, monkeypatch, tmp_path):
         monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
         monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: False)
@@ -324,6 +358,22 @@ class TestTcpServerIdentity:
         assert token not in captured["cmd"]
         assert "--api-key" not in captured["cmd"]
         assert token not in (tmp_path / "data" / "run" / "server.log").read_text()
+
+    def test_start_server_rejects_forced_tcp_without_socket_inspection(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("WHATISIT_FORCE_TCP", "1")
+        monkeypatch.setattr(engine, "running_port", lambda: None)
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+        monkeypatch.setattr(
+            engine.subprocess, "Popen",
+            lambda *args, **kwargs: pytest.fail("server should not be launched"))
+
+        with pytest.raises(RuntimeError, match="requires /proc or lsof"):
+            engine.start_server(
+                tmp_path / "model.gguf", tmp_path / "llama-server",
+                threads=2, wait=180, quiet=True)
+        assert not (tmp_path / "data" / "run" / "server.token").exists()
 
     def test_start_server_reuses_authenticated_unix_socket(self, monkeypatch, tmp_path):
         monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))

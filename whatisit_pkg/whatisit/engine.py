@@ -42,6 +42,11 @@ from .extract import extract
 
 HOST = "127.0.0.1"
 STOP = ["\n", "<|im_end|>", "```"]
+_OWNER_WAIT_MAX = 2.0
+_TCP_INSPECTION_ERROR = (
+    "TCP transport requires /proc or lsof to attribute the server connection; "
+    "use the UNIX socket transport instead"
+)
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -306,10 +311,17 @@ def _pid_owns_tcp_connection(pid: int, server_port: int, client_port: int) -> bo
         return False
 
 
+def _can_inspect_sockets() -> bool:
+    """Return whether this host exposes a supported socket ownership API."""
+    return Path("/proc/net/tcp").exists() or shutil.which("lsof") is not None
+
+
 def _wait_for_tcp_connection_owner(pid: int, server_port: int, client_port: int,
                                    timeout: float) -> bool:
     """Wait briefly for the server to accept a just-established connection."""
-    deadline = time.monotonic() + max(timeout, 0)
+    if not _can_inspect_sockets():
+        return False
+    deadline = time.monotonic() + min(max(timeout, 0), _OWNER_WAIT_MAX)
     while True:
         if _pid_owns_tcp_connection(pid, server_port, client_port):
             return True
@@ -322,6 +334,8 @@ def _verified_tcp_request(port: int, expected_pid: int, endpoint: str,
                           data: bytes | None = None, headers: dict | None = None,
                           timeout: float = 120.0) -> tuple[int, bytes]:
     """Send one request only after attributing its connection to our server."""
+    if not _can_inspect_sockets():
+        raise RuntimeError(_TCP_INSPECTION_ERROR)
     conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
     try:
         # Connect first without transmitting HTTP headers or a body.  The
@@ -353,6 +367,8 @@ def _alive(port: int | None = None, timeout: float = 0.6,
             return False
     if port is None:
         return False
+    if not _can_inspect_sockets():
+        raise RuntimeError(_TCP_INSPECTION_ERROR)
     if expected_pid is None or not _pid_owns_tcp_port(expected_pid, port):
         return False
     token = _read_token()
@@ -436,6 +452,16 @@ def start_server(model: Path, server_bin: Path, threads: int,
         return 0
     if (existing := running_port()) is not None:
         return existing
+
+    # The UNIX socket is preferred (see _UnixHTTPConnection), but older
+    # llama-server builds read --host as a hostname and fail to bind, so the
+    # transport has to be settable. TCP is safe only when its socket owner can
+    # be verified before any credential or prompt data is sent.
+    use_socket = (cfg_mod.env("FORCE_TCP") != "1"
+                  and not cfg_mod.load_config().get("force_tcp"))
+    if not use_socket and not _can_inspect_sockets():
+        raise RuntimeError(_TCP_INSPECTION_ERROR)
+
     sd = _state_dir()
     log = sd / "server.log"
 
@@ -444,11 +470,6 @@ def start_server(model: Path, server_bin: Path, threads: int,
     token = secrets.token_urlsafe(24)
     _write_private(_token_path(), token)
 
-    # The UNIX socket is preferred (see _UnixHTTPConnection), but older
-    # llama-server builds read --host as a hostname and fail to bind, so the
-    # transport has to be settable. The token below applies either way.
-    use_socket = (cfg_mod.env("FORCE_TCP") != "1"
-                  and not cfg_mod.load_config().get("force_tcp"))
     if use_socket:
         sp = _sock_path()
         sp.unlink(missing_ok=True)
