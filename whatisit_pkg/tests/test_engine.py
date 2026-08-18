@@ -135,8 +135,15 @@ class TestTcpServerIdentity:
             ("_pid_owns_tcp_connection", (1234, 43210, 54321), "01"),
         ],
     )
+    @pytest.mark.parametrize(
+        ("local_address", "remote_address"),
+        [
+            ("00000000:NOT_HEX", "00000000:ALSO_BAD"),
+            ("MISSING_SEPARATOR", "ALSO_MISSING_SEPARATOR"),
+        ],
+    )
     def test_malformed_proc_port_fails_closed(
-            self, monkeypatch, checker, args, state):
+            self, monkeypatch, checker, args, state, local_address, remote_address):
         class ProcPath:
             def __init__(self, path):
                 self.path = path
@@ -152,7 +159,7 @@ class TestTcpServerIdentity:
 
             def read_text(self):
                 return (
-                    f"header\n0: 00000000:NOT_HEX 00000000:ALSO_BAD "
+                    f"header\n0: {local_address} {remote_address} "
                     f"{state} 0 0 0 0 0 12345\n"
                 )
 
@@ -267,10 +274,15 @@ class TestTcpServerIdentity:
         monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
         monkeypatch.setattr(engine.http.client, "HTTPConnection", lambda *a, **k: Connection())
         assert engine._alive(43210, expected_pid=1234) is True
-        assert events == [
+        assert events[0:2] == [
             "connect",
             "owner",
-            ("request", "GET", "/props", "Bearer secret-token.invalid"),
+        ]
+        wrong_auth = events[2][3]
+        assert events[2][0:3] == ("request", "GET", "/props")
+        assert wrong_auth.startswith("Bearer ")
+        assert "secret-token" not in wrong_auth
+        assert events[3:] == [
             "close",
             "connect",
             "owner",
@@ -311,8 +323,11 @@ class TestTcpServerIdentity:
         monkeypatch.setattr(engine, "_UnixHTTPConnection", lambda *a, **k: Connection())
 
         assert engine._alive() is True
-        assert events == [
-            ("GET", "/props", "Bearer secret-token.invalid"),
+        wrong_auth = events[0][2]
+        assert events[0][0:2] == ("GET", "/props")
+        assert wrong_auth.startswith("Bearer ")
+        assert "secret-token" not in wrong_auth
+        assert events[1:] == [
             "close",
             ("GET", "/props", "Bearer secret-token"),
             "close",
@@ -333,7 +348,9 @@ class TestTcpServerIdentity:
         monkeypatch.setattr(engine, "_probe_status", fake_probe)
 
         assert engine._alive(43210, expected_pid=1234) is False
-        assert calls == [("/props", "secret-token.invalid")]
+        assert len(calls) == 1
+        assert calls[0][0] == "/props"
+        assert "secret-token" not in calls[0][1]
 
     def test_alive_rejects_invalid_configured_token(self, monkeypatch, tmp_path):
         monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))

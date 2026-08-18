@@ -261,7 +261,7 @@ chown across system paths, fork bombs, remote content piped into a shell or
 interpreter, crontab wipes, firewall flushes, private key exposure, reverse
 shells, credential exfiltration, and the same patterns hidden behind `sudo`,
 `env`, `nohup`, quoting tricks or `..` traversal. Findings come back as
-`DANGER` (never auto-run) or `CAUTION` (warned, still yours to approve). 475
+`DANGER` (never auto-run) or `CAUTION` (warned, still yours to approve). 477
 safety checks run in CI on Python 3.9 through 3.12.
 
 It's a denylist over a Turing-complete language, not a sandbox. Every rule in

@@ -243,7 +243,7 @@ def _pid_owns_tcp_port(pid: int, port: int) -> bool:
                     if int(fields[1].rsplit(":", 1)[1], 16) == port:
                         return True
             return False
-        except (OSError, ValueError):
+        except (OSError, ValueError, IndexError):
             pass
 
     lsof = shutil.which("lsof")
@@ -285,7 +285,7 @@ def _pid_owns_tcp_connection(pid: int, server_port: int, client_port: int) -> bo
                     if local_port == server_port and remote_port == client_port:
                         return True
             return False
-        except (OSError, ValueError):
+        except (OSError, ValueError, IndexError):
             pass
 
     lsof = shutil.which("lsof")
@@ -392,7 +392,9 @@ def _alive(port: int | None = None, timeout: float = 0.6,
         # /health and /v1/models are public in llama-server. /props is
         # side-effect-free and protected, so require proof that authentication
         # is both enforced and accepts the configured token.
-        wrong_token = f"{token}.invalid"
+        wrong_token = secrets.token_urlsafe(24)
+        while secrets.compare_digest(wrong_token, token):
+            wrong_token = secrets.token_urlsafe(24)
         return (_probe_status("/props", wrong_token, port, expected_pid, timeout) == 401
                 and _probe_status("/props", token, port, expected_pid, timeout) == 200)
     except Exception:
