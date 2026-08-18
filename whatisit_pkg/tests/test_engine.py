@@ -128,6 +128,40 @@ class TestWritePrivate:
 # --------------------------------------------------------- TCP authentication
 
 class TestTcpServerIdentity:
+    @pytest.mark.parametrize(
+        ("checker", "args", "state"),
+        [
+            ("_pid_owns_tcp_port", (1234, 43210), "0A"),
+            ("_pid_owns_tcp_connection", (1234, 43210, 54321), "01"),
+        ],
+    )
+    def test_malformed_proc_port_fails_closed(
+            self, monkeypatch, checker, args, state):
+        class ProcPath:
+            def __init__(self, path):
+                self.path = path
+
+            def __str__(self):
+                return self.path
+
+            def is_dir(self):
+                return True
+
+            def iterdir(self):
+                return [ProcPath(f"{self.path}/1")]
+
+            def read_text(self):
+                return (
+                    f"header\n0: 00000000:NOT_HEX 00000000:ALSO_BAD "
+                    f"{state} 0 0 0 0 0 12345\n"
+                )
+
+        monkeypatch.setattr(engine, "Path", ProcPath)
+        monkeypatch.setattr(engine.os, "readlink", lambda _path: "socket:[12345]")
+        monkeypatch.setattr(engine.shutil, "which", lambda _name: None)
+
+        assert getattr(engine, checker)(*args) is False
+
     @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX socket inspection")
     def test_current_process_owns_its_listening_port(self):
         with socket.socket() as listener:

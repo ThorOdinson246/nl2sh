@@ -238,7 +238,7 @@ def _pid_owns_tcp_port(pid: int, port: int) -> bool:
                     if int(fields[1].rsplit(":", 1)[1], 16) == port:
                         return True
             return False
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     lsof = shutil.which("lsof")
@@ -280,7 +280,7 @@ def _pid_owns_tcp_connection(pid: int, server_port: int, client_port: int) -> bo
                     if local_port == server_port and remote_port == client_port:
                         return True
             return False
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     lsof = shutil.which("lsof")
