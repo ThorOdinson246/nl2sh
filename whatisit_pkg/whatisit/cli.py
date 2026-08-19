@@ -113,6 +113,16 @@ def _warn_stray_flags(args) -> None:
     print(DIM(f"        flags go first:  whatisit {first} {rest}"), file=sys.stderr)
 
 
+def _emit_debug(prompt: str, system: str, user_msg: str, grammar: str | None) -> None:
+    """Print the exact prompt + grammar the model sees, for diagnosing failures."""
+    print(DIM(f"  --debug: system prompt length = {len(system)}"), file=sys.stderr)
+    print(DIM(f"  --debug: grammar = {'none' if grammar is None else 'set'}"), file=sys.stderr)
+    print(DIM(f"  --debug: user prompt:\n{user_msg}"), file=sys.stderr)
+    if grammar:
+        print(DIM(f"  --debug: GBNF grammar:\n{grammar}"), file=sys.stderr)
+    print(DIM(f"  --debug: request:\n{prompt}"), file=sys.stderr)
+
+
 def cmd_query(args, cfg: dict) -> int:
     prompt = " ".join(args.words).strip()
     if not prompt:
@@ -121,10 +131,34 @@ def cmd_query(args, cfg: dict) -> int:
 
     # Per-invocation overrides from CLI flags. These win over the saved config
     # file but do not persist to it (that is `whatisit config --set`'s job).
+    if args.model is not None:
+        os.environ["WHATISIT_MODEL"] = args.model
+    if args.threads is not None:
+        cfg["threads"] = args.threads
+    if args.port is not None:
+        cfg["server_port"] = args.port
+    if args.ctx_size is not None:
+        cfg["ctx_size"] = args.ctx_size
     if args.host_context is not None:
         cfg["host_context"] = args.host_context
     if args.grammar is not None:
         cfg["use_grammar"] = args.grammar
+    if args.debug:
+        # Show the exact prompt sent to the model and the active GBNF grammar
+        # (if any). Intended for diagnosing why the 1.5B model misbehaves; goes
+        # to stderr so `-q` output is unaffected.
+        system, user_msg = engine.hostctx.build(prompt,
+                                                enabled=cfg.get("host_context", True))
+        pkg = "unknown"
+        grammar = None
+        if cfg.get("host_context", True) and cfg.get("use_grammar", True):
+            try:
+                pkg = engine.hostctx.stable_facts().get("pkg", "unknown")
+            except OSError:
+                pass
+            if pkg != "unknown" and hasattr(engine.hostctx, "grammar_for_pkg"):
+                grammar = engine.hostctx.grammar_for_pkg(pkg)
+        _emit_debug(prompt, system, user_msg, grammar)
 
     # Remote mode sends the request (and host context, if enabled) somewhere
     # else, which is the one thing this tool otherwise promises never to do.
@@ -232,12 +266,17 @@ def cmd_query(args, cfg: dict) -> int:
             print("whatisit: refusing to execute without an interactive confirmation.",
                   file=sys.stderr)
             return 6
+        # Default stays explicit: "y"/"yes" is required. -y/--yes or
+        # confirm_default=true opts into treating an empty answer as yes.
+        empty_is_yes = args.yes or cfg.get("confirm_default", False)
+        accept = ("", "y", "yes") if empty_is_yes else ("y", "yes")
+        prompt = "[Y/n]" if empty_is_yes else "[y/N]"
         try:
-            ans = input(f"\n{BOLD('Run this?')} [y/N] ").strip().lower()
+            ans = input(f"\n{BOLD('Run this?')} {prompt} ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return 130
-        if ans not in ("y", "yes"):
+        if ans not in accept:
             print("whatisit: not running.", file=sys.stderr)
             return 0
 
@@ -672,6 +711,16 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-t", "--timing", action="store_true", help="report latency")
     ap.add_argument("--oneshot", action="store_true",
                     help="bypass the resident server (slower; for debugging)")
+    ap.add_argument("-y", "--yes", action="store_true",
+                    help="with -e, treat an empty confirm answer as yes ([Y/n])")
+    ap.add_argument("--port", type=int, metavar="PORT",
+                    help="fixed TCP port for the resident server (1-65535)")
+    ap.add_argument("--threads", type=int, metavar="N",
+                    help="override saved thread count for this invocation")
+    ap.add_argument("--ctx-size", type=int, metavar="N",
+                    help="override the saved context size for this invocation")
+    ap.add_argument("--model", metavar="PATH",
+                    help="override the registered model for this invocation")
     ap.add_argument("--host-context", dest="host_context", action="store_true",
                     help="enable host context for this invocation")
     ap.add_argument("--no-host-context", dest="host_context", action="store_false",
@@ -680,6 +729,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="enable the GBNF grammar for this invocation")
     ap.add_argument("--no-grammar", dest="grammar", action="store_false",
                     help="disable the GBNF grammar for this invocation")
+    ap.add_argument("--debug", action="store_true",
+                    help="print the exact prompt and grammar sent to the model")
 
     sub = ap.add_subparsers(dest="sub")
     s = sub.add_parser("setup", help="first-run setup: fetch the runtime and model")
@@ -711,8 +762,9 @@ def build_parser() -> argparse.ArgumentParser:
 SUBCOMMANDS = {"setup", "doctor", "stop", "config"}
 _FLAGS_NOARG = {"-e", "--execute", "-q", "--quiet", "-t", "--timing", "--oneshot",
                 "--host-context", "--no-host-context",
-                "--grammar", "--no-grammar"}
+                "--grammar", "--no-grammar", "--debug", "-y", "--yes"}
 _FLAGS_ARG = {"-n", "--num"}
+_FLAGS_QUERY_ARG = {"--port", "--threads", "--ctx-size", "--model"}
 
 
 class QueryArgs:
@@ -732,7 +784,8 @@ class QueryArgs:
     def __init__(self, argv: list[str]):
         self.num, self.execute, self.quiet = 1, False, False
         self.timing, self.oneshot = False, False
-        self.host_context, self.grammar = None, None
+        self.port, self.threads, self.ctx_size, self.model = None, None, None, None
+        self.host_context, self.grammar, self.debug, self.yes = None, None, False, False
         i = 0
         while i < len(argv):
             a = argv[i]
@@ -748,15 +801,37 @@ class QueryArgs:
                     self.grammar = True
                 elif a == "--no-grammar":
                     self.grammar = False
+                elif a in ("-y", "--yes"):
+                    self.yes = True
                 else:
                     setattr(self, {"-e": "execute", "--execute": "execute",
                                    "-q": "quiet", "--quiet": "quiet",
                                    "-t": "timing", "--timing": "timing",
-                                   "--oneshot": "oneshot"}[a], True)
+                                   "--oneshot": "oneshot",
+                                   "--debug": "debug"}[a], True)
             elif a in _FLAGS_ARG:
                 if i + 1 >= len(argv):
                     raise ValueError(f"{a} needs a number")
                 self.num = int(argv[i + 1])
+                i += 1
+            elif a in _FLAGS_QUERY_ARG:
+                if i + 1 >= len(argv):
+                    raise ValueError(f"{a} needs a value")
+                val = argv[i + 1]
+                if a == "--port":
+                    self.port = int(val)
+                    if not 1 <= self.port <= 65535:
+                        raise ValueError(f"--port must be 1..65535, got {self.port}")
+                elif a == "--threads":
+                    self.threads = int(val)
+                    if self.threads < 0:
+                        raise ValueError(f"--threads must be >= 0, got {self.threads}")
+                elif a == "--ctx-size":
+                    self.ctx_size = int(val)
+                    if self.ctx_size <= 0:
+                        raise ValueError(f"--ctx-size must be > 0, got {self.ctx_size}")
+                else:
+                    self.model = val
                 i += 1
             elif a.startswith("-n") and len(a) > 2 and a[2:].isdigit():
                 self.num = int(a[2:])          # -n3
@@ -778,7 +853,7 @@ class QueryArgs:
         # answers something odd. Record it so the caller can say so rather
         # than leaving the user to work it out. A `--` means the user already
         # said they meant it literally, so stay quiet in that case.
-        known = _FLAGS_NOARG | _FLAGS_ARG
+        known = _FLAGS_NOARG | _FLAGS_ARG | _FLAGS_QUERY_ARG
         self.stray_flags = [] if explicit else [w for w in self.words if w in known]
 
 

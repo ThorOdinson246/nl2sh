@@ -629,6 +629,95 @@ class TestGenerateDiscardsTruncatedCandidates:
             engine.generate("do something", {})
 
 
+class TestServerOverridesReachTheBoundary:
+    """The --port/--threads/--ctx-size overrides must be observable at the
+    engine boundary, not just recorded in the cfg dict handed to generate().
+
+    These sit at the command-construction seam: generate() resolves threads
+    and must forward the fixed port + context size to start_server/_query_oneshot.
+    """
+
+    def _fake_cfg_and_model(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
+        monkeypatch.setattr(engine, "hostctx", _FakeHostCtx())
+        srv = tmp_path / "llama-server"
+        srv.write_bytes(b"fake")
+        monkeypatch.setenv("WHATISIT_LLAMA_SERVER", str(srv))
+
+    def test_server_mode_forwards_fixed_port_and_ctx_size(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        seen = {}
+        monkeypatch.setattr(
+            engine, "start_server",
+            lambda model, server_bin, threads, wait=180.0, quiet=False,
+                   port=None, ctx_size=2048: seen.update(
+                       threads=threads, port=port, ctx_size=ctx_size) or 12345)
+        monkeypatch.setattr(engine, "_query_server",
+                            lambda port, prompt, cfg, n, system=None, grammar=None:
+                                [("ls", "stop")])
+        cfg = {"server_port": 9100, "ctx_size": 4096, "threads": 2}
+        cmds, _, mode = engine.generate("list files", cfg)
+        assert mode == "server"
+        assert seen["threads"] == 2
+        assert seen["port"] == 9100
+        assert seen["ctx_size"] == 4096
+
+    def test_oneshot_mode_forwards_ctx_size(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        seen = {}
+        monkeypatch.setattr(engine, "start_server",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no server")))
+        monkeypatch.setattr(cfg_mod, "find_llama_cli", lambda: tmp_path / "llama-cli")
+        monkeypatch.setattr(engine, "_query_oneshot",
+                            lambda model, cli_bin, prompt, cfg, threads,
+                                   system=None, grammar=None, ctx_size=2048: seen.update(
+                                       threads=threads, ctx_size=ctx_size) or [("ls", "stop")])
+        cfg = {"threads": 1, "ctx_size": 512}
+        cmds, _, mode = engine.generate("list files", cfg, force_oneshot=True)
+        assert mode == "oneshot"
+        assert seen["threads"] == 1
+        assert seen["ctx_size"] == 512
+
+    def test_start_server_builds_command_with_fixed_port_and_ctx_size(self, monkeypatch, tmp_path):
+        # Command-construction boundary: the fixed port and ctx size must
+        # actually reach the llama-server argv, not just the function args.
+        model = tmp_path / "model.gguf"
+        server_bin = tmp_path / "llama-server"
+        model.write_bytes(b"x")
+        server_bin.write_bytes(b"x")
+        state_dir = tmp_path / "run"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(cfg_mod, "env", lambda suffix, default=None: None)
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(engine, "running_port", lambda: None)
+        monkeypatch.setattr(engine, "_state_dir", lambda: state_dir)
+        monkeypatch.setattr(engine, "_write_private", lambda *a, **k: None)
+        monkeypatch.setattr(engine, "_alive",
+                            lambda port=None, timeout=0.6, expected_pid=None: True)
+        captured = {}
+        class _FakeProc:
+            pid = 2468
+
+            def poll(self):
+                return None
+        def fake_popen(cmd, *a, **k):
+            captured["cmd"] = cmd
+            return _FakeProc()
+        monkeypatch.setattr(engine.subprocess, "Popen", fake_popen)
+        port = engine.start_server(model, server_bin, 2, wait=0.05, quiet=True,
+                                   port=9100, ctx_size=4096)
+        assert port == 9100
+        cmd = captured["cmd"]
+        assert "--port" in cmd
+        assert cmd[cmd.index("--port") + 1] == "9100"
+        assert "-c" in cmd
+        assert cmd[cmd.index("-c") + 1] == "4096"
+        assert "-t" in cmd
+        assert cmd[cmd.index("-t") + 1] == "2"
+
+
 class _FakeHostCtx:
     @staticmethod
     def build(prompt, enabled=True, cwd=None, include_volatile=True):

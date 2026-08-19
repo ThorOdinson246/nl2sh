@@ -92,6 +92,10 @@ DEFAULTS = {
     "max_tokens": 64,
     "temperature": 0.0,    # greedy: same question -> same command
     "confirm_execute": True,
+    # OFF by default: -e output goes straight to a shell, so Enter must not run
+    # commands unless the user opted in. Set confirm_default=true to get [Y/n]
+    # (empty answer means yes) on the confirmation prompt.
+    "confirm_default": False,
     # OFF by default. It is cheap (prefix-cached) but MEASURED HARMFUL on the
     # only benchmark available: 54.2% -> 45.1% pass, p=0.0004. See hostctx.py.
     "host_context": False,
@@ -101,8 +105,11 @@ DEFAULTS = {
     # postprocessing remains active as a backstop.
     "use_grammar": True,
     # Serve over a TCP port instead of a UNIX socket. Set by `setup` when it
-    # installs a runtime whose llama-server cannot bind a socket path.
+    # installs a runtime whose llama-server cannot bind a socket path. A fixed
+    # value forces that port; None keeps the current auto/free-port behaviour.
     "force_tcp": False,
+    "server_port": None,       # fixed TCP port for the resident server
+    "ctx_size": 2048,          # context size passed to llama-server/llama-cli
 }
 
 
