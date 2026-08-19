@@ -6,6 +6,7 @@ monkeypatched, and "model" paths are just empty tmp_path files that only need
 to exist.
 """
 import os
+import socket
 import stat
 import sys
 import urllib.error
@@ -124,6 +125,365 @@ class TestWritePrivate:
         assert target.read_text() == "do not touch me"
 
 
+# --------------------------------------------------------- TCP authentication
+
+class TestTcpServerIdentity:
+    @pytest.fixture(autouse=True)
+    def _socket_inspection_available(self, monkeypatch):
+        # These exercise the attribution logic itself, not whether the host can
+        # inspect sockets. Without this they depend on /proc or lsof existing --
+        # false on Windows, and in a minimal container.
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+
+    @pytest.mark.parametrize(
+        ("checker", "args", "state"),
+        [
+            ("_pid_owns_tcp_port", (1234, 43210), "0A"),
+            ("_pid_owns_tcp_connection", (1234, 43210, 54321), "01"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("local_address", "remote_address"),
+        [
+            ("00000000:NOT_HEX", "00000000:ALSO_BAD"),
+            ("MISSING_SEPARATOR", "ALSO_MISSING_SEPARATOR"),
+        ],
+    )
+    def test_malformed_proc_port_fails_closed(
+            self, monkeypatch, checker, args, state, local_address, remote_address):
+        class ProcPath:
+            def __init__(self, path):
+                self.path = path
+
+            def __str__(self):
+                return self.path
+
+            def is_dir(self):
+                return True
+
+            def iterdir(self):
+                return [ProcPath(f"{self.path}/1")]
+
+            def read_text(self):
+                return (
+                    f"header\n0: {local_address} {remote_address} "
+                    f"{state} 0 0 0 0 0 12345\n"
+                )
+
+        monkeypatch.setattr(engine, "Path", ProcPath)
+        monkeypatch.setattr(engine.os, "readlink", lambda _path: "socket:[12345]")
+        monkeypatch.setattr(engine.shutil, "which", lambda _name: None)
+
+        assert getattr(engine, checker)(*args) is False
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX socket inspection")
+    def test_current_process_owns_its_listening_port(self):
+        with socket.socket() as listener:
+            listener.bind((engine.HOST, 0))
+            listener.listen()
+            assert engine._pid_owns_tcp_port(os.getpid(), listener.getsockname()[1]) is True
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX socket inspection")
+    def test_current_process_owns_its_established_connection(self):
+        with socket.socket() as listener, socket.socket() as client:
+            listener.bind((engine.HOST, 0))
+            listener.listen()
+            server_port = listener.getsockname()[1]
+            client.connect((engine.HOST, server_port))
+            accepted, _ = listener.accept()
+            with accepted:
+                assert engine._pid_owns_tcp_connection(
+                    os.getpid(), server_port, client.getsockname()[1]) is True
+
+    def test_connection_owner_wait_is_capped(self, monkeypatch):
+        times = iter((10.0, 10.0 + engine._OWNER_WAIT_MAX))
+        monkeypatch.setattr(engine.time, "monotonic", lambda: next(times))
+        monkeypatch.setattr(engine.time, "sleep", lambda _delay: pytest.fail("slept past cap"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+        monkeypatch.setattr(engine, "_pid_owns_tcp_connection", lambda *args: False)
+
+        assert engine._wait_for_tcp_connection_owner(1234, 43210, 54321, 120.0) is False
+
+    def test_connection_owner_wait_fails_immediately_without_inspection(
+            self, monkeypatch):
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+        monkeypatch.setattr(
+            engine, "_pid_owns_tcp_connection",
+            lambda *args: pytest.fail("ownership check should not run"))
+
+        assert engine._wait_for_tcp_connection_owner(1234, 43210, 54321, 120.0) is False
+
+    def test_verified_request_names_missing_socket_inspection(self, monkeypatch):
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+        monkeypatch.setattr(
+            engine.http.client, "HTTPConnection",
+            lambda *args, **kwargs: pytest.fail("connection should not be opened"))
+
+        with pytest.raises(RuntimeError, match="requires /proc or lsof"):
+            engine._verified_tcp_request(43210, 1234, "/v1/models")
+
+    def test_alive_propagates_missing_socket_inspection(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+
+        with pytest.raises(RuntimeError, match="requires /proc or lsof"):
+            engine._alive(43210, expected_pid=1234)
+
+    def test_alive_does_not_send_token_to_wrong_pid(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: False)
+        monkeypatch.setattr(
+            engine.http.client, "HTTPConnection",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("network request attempted")))
+        assert engine._alive(43210, expected_pid=1234) is False
+
+    def test_alive_authenticates_after_connection_owner_check(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        events = []
+        statuses = iter((401, 200))
+
+        class Response:
+            def __init__(self):
+                self.status = next(statuses)
+
+            @staticmethod
+            def read(_size=-1):
+                return b""
+
+        class Socket:
+            @staticmethod
+            def getsockname():
+                return (engine.HOST, 54321)
+
+        class Connection:
+            sock = Socket()
+
+            @staticmethod
+            def connect():
+                events.append("connect")
+
+            @staticmethod
+            def request(method, endpoint, body=None, headers=None):
+                events.append(("request", method, endpoint, headers.get("Authorization")))
+
+            @staticmethod
+            def getresponse():
+                return Response()
+
+            @staticmethod
+            def close():
+                events.append("close")
+
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(
+            engine, "_wait_for_tcp_connection_owner",
+            lambda pid, server_port, client_port, timeout: events.append("owner") or True)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        monkeypatch.setattr(engine.http.client, "HTTPConnection", lambda *a, **k: Connection())
+        assert engine._alive(43210, expected_pid=1234) is True
+        assert events[0:2] == [
+            "connect",
+            "owner",
+        ]
+        wrong_auth = events[2][3]
+        assert events[2][0:3] == ("request", "GET", "/props")
+        assert wrong_auth.startswith("Bearer ")
+        assert "secret-token" not in wrong_auth
+        assert events[3:] == [
+            "close",
+            "connect",
+            "owner",
+            ("request", "GET", "/props", "Bearer secret-token"),
+            "close",
+        ]
+
+    def test_alive_authenticates_unix_socket(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        socket_path = tmp_path / "data" / "run" / "server.sock"
+        socket_path.parent.mkdir(parents=True)
+        socket_path.touch()
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        events = []
+        statuses = iter((401, 200))
+
+        class Response:
+            def __init__(self):
+                self.status = next(statuses)
+
+            @staticmethod
+            def read(_size=-1):
+                return b""
+
+        class Connection:
+            @staticmethod
+            def request(method, endpoint, body=None, headers=None):
+                events.append((method, endpoint, headers.get("Authorization")))
+
+            @staticmethod
+            def getresponse():
+                return Response()
+
+            @staticmethod
+            def close():
+                events.append("close")
+
+        monkeypatch.setattr(engine, "_UnixHTTPConnection", lambda *a, **k: Connection())
+
+        assert engine._alive() is True
+        wrong_auth = events[0][2]
+        assert events[0][0:2] == ("GET", "/props")
+        assert wrong_auth.startswith("Bearer ")
+        assert "secret-token" not in wrong_auth
+        assert events[1:] == [
+            "close",
+            ("GET", "/props", "Bearer secret-token"),
+            "close",
+        ]
+
+    def test_alive_rejects_endpoint_that_does_not_enforce_authentication(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        calls = []
+
+        def fake_probe(endpoint, token, port, expected_pid, timeout):
+            calls.append((endpoint, token))
+            return 200
+
+        monkeypatch.setattr(engine, "_probe_status", fake_probe)
+
+        assert engine._alive(43210, expected_pid=1234) is False
+        assert len(calls) == 1
+        assert calls[0][0] == "/props"
+        assert "secret-token" not in calls[0][1]
+
+    def test_alive_rejects_invalid_configured_token(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        statuses = iter((401, 401))
+        monkeypatch.setattr(engine, "_probe_status", lambda *args: next(statuses))
+
+        assert engine._alive(43210, expected_pid=1234) is False
+
+    def test_alive_never_sends_token_when_connection_owner_differs(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+
+        class Socket:
+            @staticmethod
+            def getsockname():
+                return (engine.HOST, 54321)
+
+        class Connection:
+            sock = Socket()
+
+            @staticmethod
+            def connect():
+                pass
+
+            @staticmethod
+            def request(*args, **kwargs):
+                raise AssertionError("token sent to unverified connection")
+
+            @staticmethod
+            def close():
+                pass
+
+        monkeypatch.setattr(engine, "_pid_owns_tcp_port", lambda pid, port: True)
+        monkeypatch.setattr(engine, "_wait_for_tcp_connection_owner", lambda *args: False)
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        monkeypatch.setattr(engine.http.client, "HTTPConnection", lambda *a, **k: Connection())
+        assert engine._alive(43210, expected_pid=1234) is False
+
+    def test_request_verifies_the_prompt_connection_before_sending(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(engine, "_tcp_server_state", lambda: (43210, 1234))
+        monkeypatch.setattr(engine, "_read_token", lambda: "secret-token")
+        captured = {}
+
+        def fake_request(port, expected_pid, endpoint, data=None, headers=None, timeout=120.0):
+            captured.update(port=port, expected_pid=expected_pid, endpoint=endpoint,
+                            data=data, headers=headers, timeout=timeout)
+            return 200, b'{"choices": []}'
+
+        monkeypatch.setattr(engine, "_verified_tcp_request", fake_request)
+        result = engine._request("/v1/chat/completions", {"messages": ["secret prompt"]})
+
+        assert result == {"choices": []}
+        assert captured["port"] == 43210
+        assert captured["expected_pid"] == 1234
+        assert captured["endpoint"] == "/v1/chat/completions"
+        assert b"secret prompt" in captured["data"]
+        assert captured["headers"]["Authorization"] == "Bearer secret-token"
+
+    def test_start_server_keeps_token_out_of_argv_and_log(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.gguf"
+        server = tmp_path / "llama-server"
+        model.write_bytes(b"model")
+        server.write_bytes(b"binary")
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("WHATISIT_FORCE_TCP", "1")
+        monkeypatch.setattr(engine, "running_port", lambda: None)
+        monkeypatch.setattr(engine, "_free_port", lambda: 43210)
+        monkeypatch.setattr(engine, "_alive", lambda port=None, timeout=0.6, expected_pid=None:
+                            expected_pid == 2468)
+        captured = {}
+
+        class Process:
+            pid = 2468
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return None
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs["env"]
+            return Process()
+
+        monkeypatch.setattr(engine.subprocess, "Popen", fake_popen)
+        assert engine.start_server(model, server, threads=2, wait=1, quiet=True) == 43210
+
+        token = captured["env"]["LLAMA_API_KEY"]
+        assert token
+        assert token not in captured["cmd"]
+        assert "--api-key" not in captured["cmd"]
+        assert token not in (tmp_path / "data" / "run" / "server.log").read_text()
+
+    def test_start_server_rejects_forced_tcp_without_socket_inspection(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("WHATISIT_FORCE_TCP", "1")
+        monkeypatch.setattr(engine, "running_port", lambda: None)
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: False)
+        monkeypatch.setattr(
+            engine.subprocess, "Popen",
+            lambda *args, **kwargs: pytest.fail("server should not be launched"))
+
+        with pytest.raises(RuntimeError, match="requires /proc or lsof"):
+            engine.start_server(
+                tmp_path / "model.gguf", tmp_path / "llama-server",
+                threads=2, wait=180, quiet=True)
+        assert not (tmp_path / "data" / "run" / "server.token").exists()
+
+    def test_start_server_reuses_authenticated_unix_socket(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        sock = tmp_path / "data" / "run" / "server.sock"
+        sock.parent.mkdir(parents=True)
+        sock.touch()
+        monkeypatch.setattr(engine, "_alive", lambda *a, **k: True)
+        monkeypatch.setattr(
+            engine.subprocess, "Popen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("server restarted")))
+        assert engine.start_server(tmp_path / "model", tmp_path / "server", threads=1) == 0
+
+
 # ------------------------------------------------------ greedy-first ordering
 
 class TestQueryServerGreedyOrdering:
@@ -227,106 +587,46 @@ class TestGenerateDiscardsTruncatedCandidates:
         cmds, _, _ = engine.generate("list files", {}, n=2)
         assert cmds == ["ls -la"]
 
+    @pytest.mark.parametrize("kwargs", [{"quiet": True}, {"for_execution": True}])
+    def test_execution_paths_suppress_volatile_host_context(
+            self, monkeypatch, tmp_path, kwargs):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        captured = {}
+
+        class CaptureHostCtx:
+            @staticmethod
+            def build(prompt, enabled=True, cwd=None, include_volatile=True):
+                captured["include_volatile"] = include_volatile
+                return ("SYSTEM PROMPT", prompt)
+
+            @staticmethod
+            def stable_facts():
+                return {"pkg": "unknown"}
+
+            @staticmethod
+            def postprocess_command(cmd, pkg_mgr):
+                return cmd
+
+            @staticmethod
+            def grammar_for_pkg(pkg_mgr):
+                return None
+
+            @staticmethod
+            def is_install_request(prompt):
+                return False
+
+        monkeypatch.setattr(engine, "hostctx", CaptureHostCtx())
+        monkeypatch.setattr(
+            engine, "_query_server",
+            lambda port, prompt, cfg, n, system=None, grammar=None: [("ls -la", "stop")])
+
+        engine.generate("list files", {}, **kwargs)
+        assert captured["include_volatile"] is False
+
     def test_no_model_raises_file_not_found(self, monkeypatch):
         monkeypatch.setattr(cfg_mod, "find_model", lambda: None)
         with pytest.raises(FileNotFoundError):
             engine.generate("do something", {})
-
-
-# ------------------------------------------------ generate(): grammar + postprocess wiring
-
-class TestGenerateGrammarAndPostprocess:
-    """generate() must pass the GBNF grammar to the local backends and run each
-    extracted command through hostctx.postprocess_command using the host pkg.
-    """
-
-    def _fake_cfg_and_model(self, monkeypatch, tmp_path):
-        model = tmp_path / "model.gguf"
-        model.write_bytes(b"fake")
-        monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
-        srv = tmp_path / "llama-server"
-        srv.write_bytes(b"fake")
-        monkeypatch.setenv("WHATISIT_LLAMA_SERVER", str(srv))
-        monkeypatch.setattr(engine, "start_server", lambda *a, **kw: 12345)
-
-    def test_passes_grammar_to_query_server(self, monkeypatch, tmp_path):
-        self._fake_cfg_and_model(monkeypatch, tmp_path)
-
-        class FakeHost:
-            @staticmethod
-            def build(prompt, enabled=True, cwd=None, include_volatile=True):
-                return ("SYS", prompt)
-            @staticmethod
-            def stable_facts():
-                return {"pkg": "pacman"}
-            @staticmethod
-            def grammar_for_pkg(pkg_mgr):
-                return "fake-grammar"
-            @staticmethod
-            def is_install_request(prompt):
-                return True
-            @staticmethod
-            def postprocess_command(cmd, pkg_mgr):
-                assert pkg_mgr == "pacman"
-                return cmd
-
-        monkeypatch.setattr(engine, "hostctx", FakeHost())
-        captured = {}
-        def fake_query_server(port, prompt, cfg, n, system=None, grammar=None):
-            captured["grammar"] = grammar
-            return [("pacman -S htop", "stop")]
-        monkeypatch.setattr(engine, "_query_server", fake_query_server)
-
-        cmds, _, mode = engine.generate("install htop", {}, n=1)
-        assert captured["grammar"] == "fake-grammar"
-        assert mode == "server"
-
-    def test_postprocesses_wrong_distro_syntax(self, monkeypatch, tmp_path):
-        self._fake_cfg_and_model(monkeypatch, tmp_path)
-        # Drive postprocessing with the real implementation, pinned to pacman.
-        monkeypatch.setattr(engine.hostctx, "build",
-                            lambda p, enabled=True, cwd=None, include_volatile=True: ("SYS", p))
-        monkeypatch.setattr(engine.hostctx, "stable_facts",
-                            lambda *a, **k: {"pkg": "pacman"})
-        monkeypatch.setattr(engine.hostctx, "grammar_for_pkg",
-                            lambda pkg_mgr: None)
-        monkeypatch.setattr(engine, "_query_server",
-                            lambda *a, **k: [("apt-get install -y htop", "stop")])
-        cmds, _, _ = engine.generate("install htop", {}, n=1)
-        assert cmds == ["pacman -S htop"]
-
-    def test_oneshot_passes_prompts_and_grammar_via_files(self, monkeypatch, tmp_path):
-        """_query_oneshot must not put the prompt/system/grammar on the argv:
-        llama-cli's command line is visible to any co-tenant via `ps`."""
-        model = tmp_path / "model.gguf"
-        model.write_bytes(b"fake")
-        cli = tmp_path / "llama-cli"
-        cli.write_bytes(b"fake")
-
-        captured = {}
-        class _Proc:
-            returncode = 0
-            stdout = "> install htop\npacman -S htop\n[ Prompt: 12 tokens ]\n"
-            stderr = ""
-        def fake_run(cmd, **kw):
-            captured["cmd"] = list(cmd)
-            return _Proc()
-
-        monkeypatch.setattr(engine.subprocess, "run", fake_run)
-        engine._query_oneshot(model, cli, "install htop", {}, threads=1,
-                              system="SYS", grammar="GBNF")
-
-        cmd = captured["cmd"]
-        assert "--file" in cmd and "--system-prompt-file" in cmd and "--grammar-file" in cmd
-        # The raw prompt, system prompt and grammar must never appear as argv
-        # elements, only as paths to private files.
-        assert "install htop" not in cmd
-        assert "SYS" not in cmd
-        assert "GBNF" not in cmd
-        # The files themselves must be 0600 and cleaned up afterwards.
-        for flag in ("--file", "--system-prompt-file", "--grammar-file"):
-            path = cmd[cmd.index(flag) + 1]
-            assert not os.path.exists(path)
 
 
 class _FakeHostCtx:
@@ -358,10 +658,11 @@ class _FakeResp:
         return self
 
     def __exit__(self, *a):
+        self.close()
         return False
 
     def close(self):
-        pass
+        self._exhausted = True
 
     def read(self, size=-1, *a, **k):
         # One-shot stream, like a real HTTP response body: emit the payload
@@ -569,6 +870,24 @@ class TestGenerateRemote:
         monkeypatch.setattr(engine.hostctx, "build",
                             lambda p, enabled=True, cwd=None, include_volatile=True: ("SYS", p))
 
+    @pytest.mark.parametrize("kwargs", [{"quiet": True}, {"for_execution": True}])
+    def test_remote_execution_paths_suppress_volatile_host_context(
+            self, monkeypatch, kwargs):
+        remote = self._remote()
+        monkeypatch.setattr(cfg_mod, "remote_config", lambda cfg: remote)
+        captured = {}
+
+        def capture_context(prompt, enabled=True, cwd=None, include_volatile=True):
+            captured["include_volatile"] = include_volatile
+            return ("SYS", prompt)
+
+        monkeypatch.setattr(engine.hostctx, "build", capture_context)
+        monkeypatch.setattr(engine, "_query_remote",
+                            lambda *a, **k: [("ls -la", "stop")])
+
+        engine.generate("list files", {}, **kwargs)
+        assert captured["include_volatile"] is False
+
     def test_remote_mode_needs_no_local_model(self, monkeypatch):
         self._enable_remote(monkeypatch, self._remote())
         monkeypatch.setattr(cfg_mod, "find_model", lambda: None)
@@ -628,3 +947,97 @@ class TestRemoteWarnings:
     def test_invalid_url_reported(self):
         w = engine.remote_warnings({"base_url": "not-a-url", "api_key": ""})
         assert any("invalid" in x for x in w)
+
+
+class TestGenerateGrammarAndPostprocess:
+    """generate() must pass the GBNF grammar to the local backends and run each
+    extracted command through hostctx.postprocess_command using the host pkg.
+    """
+
+    def _fake_cfg_and_model(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
+        srv = tmp_path / "llama-server"
+        srv.write_bytes(b"fake")
+        monkeypatch.setenv("WHATISIT_LLAMA_SERVER", str(srv))
+        monkeypatch.setattr(engine, "start_server", lambda *a, **kw: 12345)
+
+    def test_passes_grammar_to_query_server(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+
+        class FakeHost:
+            @staticmethod
+            def build(prompt, enabled=True, cwd=None, include_volatile=True):
+                return ("SYS", prompt)
+            @staticmethod
+            def stable_facts():
+                return {"pkg": "pacman"}
+            @staticmethod
+            def grammar_for_pkg(pkg_mgr):
+                return "fake-grammar"
+            @staticmethod
+            def is_install_request(prompt):
+                return True
+            @staticmethod
+            def postprocess_command(cmd, pkg_mgr):
+                assert pkg_mgr == "pacman"
+                return cmd
+
+        monkeypatch.setattr(engine, "hostctx", FakeHost())
+        captured = {}
+        def fake_query_server(port, prompt, cfg, n, system=None, grammar=None):
+            captured["grammar"] = grammar
+            return [("pacman -S htop", "stop")]
+        monkeypatch.setattr(engine, "_query_server", fake_query_server)
+
+        cmds, _, mode = engine.generate("install htop", {}, n=1)
+        assert captured["grammar"] == "fake-grammar"
+        assert mode == "server"
+
+    def test_postprocesses_wrong_distro_syntax(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        # Drive postprocessing with the real implementation, pinned to pacman.
+        monkeypatch.setattr(engine.hostctx, "build",
+                            lambda p, enabled=True, cwd=None, include_volatile=True: ("SYS", p))
+        monkeypatch.setattr(engine.hostctx, "stable_facts",
+                            lambda *a, **k: {"pkg": "pacman"})
+        monkeypatch.setattr(engine.hostctx, "grammar_for_pkg",
+                            lambda pkg_mgr: None)
+        monkeypatch.setattr(engine, "_query_server",
+                            lambda *a, **k: [("apt-get install -y htop", "stop")])
+        cmds, _, _ = engine.generate("install htop", {}, n=1)
+        assert cmds == ["pacman -S htop"]
+
+    def test_oneshot_passes_prompts_and_grammar_via_files(self, monkeypatch, tmp_path):
+        """_query_oneshot must not put the prompt/system/grammar on the argv:
+        llama-cli's command line is visible to any co-tenant via `ps`."""
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        cli = tmp_path / "llama-cli"
+        cli.write_bytes(b"fake")
+
+        captured = {}
+        class _Proc:
+            returncode = 0
+            stdout = "> install htop\npacman -S htop\n[ Prompt: 12 tokens ]\n"
+            stderr = ""
+        def fake_run(cmd, **kw):
+            captured["cmd"] = list(cmd)
+            return _Proc()
+
+        monkeypatch.setattr(engine.subprocess, "run", fake_run)
+        engine._query_oneshot(model, cli, "install htop", {}, threads=1,
+                              system="SYS", grammar="GBNF")
+
+        cmd = captured["cmd"]
+        assert "--file" in cmd and "--system-prompt-file" in cmd and "--grammar-file" in cmd
+        # The raw prompt, system prompt and grammar must never appear as argv
+        # elements, only as paths to private files.
+        assert "install htop" not in cmd
+        assert "SYS" not in cmd
+        assert "GBNF" not in cmd
+        # The files themselves must be 0600 and cleaned up afterwards.
+        for flag in ("--file", "--system-prompt-file", "--grammar-file"):
+            path = cmd[cmd.index(flag) + 1]
+            assert not os.path.exists(path)
