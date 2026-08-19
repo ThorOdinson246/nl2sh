@@ -419,7 +419,13 @@ def running_port() -> int | None:
     if state is None:
         return None
     port, pid = state
-    return port if _alive(port, expected_pid=pid) else None
+    try:
+        return port if _alive(port, expected_pid=pid) else None
+    except RuntimeError:
+        # A recorded port we cannot attribute to a pid is a port we will not
+        # talk to, which is the same answer as "nothing is running". This is a
+        # status query -- `doctor` calls it -- so it must not raise.
+        return None
 
 
 def _is_our_server(pid: int) -> bool:
@@ -877,6 +883,9 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         if force_oneshot:
             raise RuntimeError(
                 "--oneshot applies to the local backend and cannot be used with a remote endpoint")
+        # -e and -q feed a shell. The volatile block carries filenames from the
+        # cwd, which the user did not type, so it is withheld from the two
+        # flows whose output can run. Ordinary suggestions still get it.
         system, user_msg = hostctx.build(
             prompt, enabled=cfg.get("host_context", True),
             include_volatile=not (for_execution or quiet))
