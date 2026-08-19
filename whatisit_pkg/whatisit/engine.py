@@ -207,6 +207,10 @@ def _port_file() -> Path:
     return _state_dir() / "server.port"
 
 
+def _params_file() -> Path:
+    return _state_dir() / "server.params"
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind((HOST, 0))
@@ -468,16 +472,24 @@ def stop_server() -> bool:
     _port_file().unlink(missing_ok=True)
     _sock_path().unlink(missing_ok=True)
     _token_path().unlink(missing_ok=True)
+    _params_file().unlink(missing_ok=True)
     return stopped
 
 
-def start_server(model: Path, server_bin: Path, threads: int,
-                 wait: float = 180.0, quiet: bool = False) -> int:
-    if _sock_path().exists() and _alive():
-        return 0
-    if (existing := running_port()) is not None:
-        return existing
+def _read_params() -> dict | None:
+    """The launch parameters of the resident server, if any are recorded."""
+    pf = _params_file()
+    if not pf.exists():
+        return None
+    try:
+        return json.loads(pf.read_text())
+    except (OSError, ValueError):
+        return None
 
+
+def start_server(model: Path, server_bin: Path, threads: int,
+                 wait: float = 180.0, quiet: bool = False,
+                 port: int | None = None, ctx_size: int = 2048) -> int:
     # The UNIX socket is preferred (see _UnixHTTPConnection), but older
     # llama-server builds read --host as a hostname and fail to bind, so the
     # transport has to be settable. TCP is safe only when its socket owner can
@@ -487,6 +499,28 @@ def start_server(model: Path, server_bin: Path, threads: int,
     if not use_socket and not _can_inspect_sockets():
         raise RuntimeError(_TCP_INSPECTION_ERROR)
 
+    requested = {
+        "model": str(model),
+        "server_bin": str(server_bin),
+        "threads": threads,
+        "ctx_size": ctx_size,
+        "port": port,
+        "use_socket": use_socket,
+    }
+    recorded = _read_params()
+    # A resident server may only be reused when it was launched with the exact
+    # parameters being requested. --port/--threads/--model/--ctx-size would
+    # otherwise be silently ignored on every query after the first one. A
+    # server with no recorded params is a legacy/unknown launch, which we keep
+    # reusing as before.
+    if recorded is None or recorded == requested:
+        if use_socket and _sock_path().exists() and _alive():
+            return 0
+        if (existing := running_port()) is not None:
+            return existing
+    if recorded is not None:
+        stop_server()
+
     sd = _state_dir()
     log = sd / "server.log"
 
@@ -495,16 +529,18 @@ def start_server(model: Path, server_bin: Path, threads: int,
     token = secrets.token_urlsafe(24)
     _write_private(_token_path(), token)
 
-    if use_socket:
+    if use_socket and port is None:
         sp = _sock_path()
         sp.unlink(missing_ok=True)
         port = 0
         cmd = [str(server_bin), "-m", str(model), "--host", str(sp),
-               "-t", str(threads), "-c", "2048", "--no-webui"]
+               "-t", str(threads), "-c", str(ctx_size), "--no-webui"]
     else:
-        port = _free_port()
-        cmd = [str(server_bin), "-m", str(model), "--host", HOST, "--port", str(port),
-               "-t", str(threads), "-c", "2048", "--no-webui"]
+        if port is None:
+            port = _free_port()
+        cmd = [str(server_bin), "-m", str(model), "--host", HOST,
+               "--port", str(port), "-t", str(threads), "-c", str(ctx_size),
+               "--no-webui"]
     # The server log records the launch command line and can contain prompt
     # text; it gets the same owner-only treatment as the pid and token.
     log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -538,6 +574,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
         if _alive(port or None, expected_pid=proc.pid if port else None):
             if not quiet:
                 print(" ready.", file=sys.stderr, flush=True)
+            _write_private(_params_file(), json.dumps(requested))
             return port
         time.sleep(0.3)
     raise RuntimeError(f"llama-server did not become ready in {wait:.0f}s; see {log}")
@@ -802,7 +839,8 @@ def _query_remote(remote: dict, prompt: str, cfg: dict, n: int,
 
 def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int,
                    system: str | None = None,
-                   grammar: str | None = None) -> list[str]:
+                   grammar: str | None = None,
+                   ctx_size: int = 2048) -> list[str]:
     """One-shot generation via a single llama-cli invocation.
 
     The prompt, system prompt and grammar all go through 0o600 temp files, not
@@ -824,7 +862,8 @@ def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: 
         cmd = [str(cli_bin), "-m", str(model), "--file", prm_file.name,
                "-st", "--no-display-prompt", "--no-warmup",
                "--temp", str(cfg.get("temperature", 0.0)),
-               "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads)]
+               "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads),
+               "-c", str(ctx_size)]
 
         cmd.extend(["--system-prompt-file", sys_file.name])
 
@@ -985,7 +1024,9 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
 
     t0 = time.time()
     if server_bin is not None:
-        port = start_server(model, server_bin, threads, quiet=quiet)
+        port = start_server(model, server_bin, threads, quiet=quiet,
+                            port=cfg.get("server_port"),
+                            ctx_size=cfg.get("ctx_size", 2048))
         raws = _query_server(port, user_msg, cfg, n, system=system, grammar=grammar)
         mode = "server"
     else:
@@ -994,7 +1035,8 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
             raise FileNotFoundError(
                 "neither llama-server nor llama-cli found -- run `whatisit doctor`")
         raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system,
-                              grammar=grammar)
+                              grammar=grammar,
+                              ctx_size=cfg.get("ctx_size", 2048))
         mode = "oneshot"
 
     cmds = _collect_commands(raws, host_pkg)

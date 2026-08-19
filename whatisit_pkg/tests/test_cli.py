@@ -11,6 +11,8 @@ These cover cases that were REAL bugs found by typing realistic requests:
 None of this starts a server or touches the network: engine.generate is
 monkeypatched wherever cmd_query would otherwise call into it.
 """
+import os
+
 import pytest
 
 from whatisit import cli
@@ -293,3 +295,152 @@ class TestRemoteCli:
         assert rc == 0
         assert captured.out.strip() == "ls"
         assert "leaves this machine" in captured.err
+
+
+# --------------------------------------------------------------- QueryArgs extras
+
+def test_port_threads_model_flags_parse():
+    a = cli.QueryArgs(["--port", "9000", "--threads", "8", "--model",
+                       "/models/3b.gguf", "list", "files"])
+    assert a.port == 9000
+    assert a.threads == 8
+    assert a.model == "/models/3b.gguf"
+    assert a.words == ["list", "files"]
+
+
+def test_ctx_size_flag_parse():
+    a = cli.QueryArgs(["--ctx-size", "4096", "list", "files"])
+    assert a.ctx_size == 4096
+    assert a.words == ["list", "files"]
+
+
+def test_no_host_context_and_no_grammar_flags():
+    a = cli.QueryArgs(["--no-host-context", "--no-grammar", "list", "files"])
+    assert a.host_context is False
+    assert a.grammar is False
+    assert a.words == ["list", "files"]
+
+
+def test_flag_needs_value_raises():
+    with pytest.raises(ValueError):
+        cli.QueryArgs(["--port"])
+    with pytest.raises(ValueError):
+        cli.QueryArgs(["--threads"])
+    with pytest.raises(ValueError):
+        cli.QueryArgs(["--model"])
+
+
+def test_debug_flag_is_set():
+    a = cli.QueryArgs(["--debug", "list", "files"])
+    assert a.debug is True
+    assert a.words == ["list", "files"]
+
+
+def test_yes_flag_and_enable_overrides_parse():
+    a = cli.QueryArgs(["-y", "--host-context", "--grammar", "list", "files"])
+    assert a.yes is True
+    assert a.host_context is True
+    assert a.grammar is True
+    assert a.words == ["list", "files"]
+
+
+def test_enable_and_disable_host_context_are_mutually_consistent():
+    a = cli.QueryArgs(["--host-context", "list", "files"])
+    assert a.host_context is True
+    b = cli.QueryArgs(["--no-host-context", "list", "files"])
+    assert b.host_context is False
+
+
+def test_port_range_is_validated():
+    with pytest.raises(ValueError, match="1\\.\\.65535"):
+        cli.QueryArgs(["--port", "0", "list", "files"])
+    with pytest.raises(ValueError, match="1\\.\\.65535"):
+        cli.QueryArgs(["--port", "70000", "list", "files"])
+    assert cli.QueryArgs(["--port", "65535", "list", "files"]).port == 65535
+
+
+def test_ctx_size_and_threads_ranges_are_validated():
+    with pytest.raises(ValueError, match="> 0"):
+        cli.QueryArgs(["--ctx-size", "0", "list", "files"])
+    with pytest.raises(ValueError, match="> 0"):
+        cli.QueryArgs(["--ctx-size", "-1", "list", "files"])
+    with pytest.raises(ValueError, match=">= 0"):
+        cli.QueryArgs(["--threads", "-1", "list", "files"])
+
+
+def test_value_taking_query_flags_are_flagged_when_stray():
+    a = cli.QueryArgs(["list", "files", "--port", "9000"])
+    assert a.port is None
+    assert a.stray_flags == ["--port"]
+    b = cli.QueryArgs(["list", "files", "--ctx-size", "4096"])
+    assert b.stray_flags == ["--ctx-size"]
+
+
+# --------------------------------------------------------------- cmd_query wiring
+
+class TestQueryFlagsApply:
+    def _isolate(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+
+    def test_port_thread_model_overrides_config(self, monkeypatch, tmp_path, capsys):
+        self._isolate(monkeypatch, tmp_path)
+        seen = {}
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
+            seen["cfg"] = dict(cfg)
+            return (["ls -la"], 0.01, "server")
+        monkeypatch.setattr(cli.engine, "generate", fake_generate)
+        rc = cli.main(["--port", "9100", "--threads", "2",
+                       "--model", "/m.gguf", "list", "files"])
+        assert rc == 0
+        assert seen["cfg"]["server_port"] == 9100
+        assert seen["cfg"]["threads"] == 2
+        assert os.environ["WHATISIT_MODEL"] == "/m.gguf"
+
+    def test_no_grammar_disables_grammar(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        seen = {}
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
+            seen["cfg"] = dict(cfg)
+            return (["ls"], 0.01, "server")
+        monkeypatch.setattr(cli.engine, "generate", fake_generate)
+        rc = cli.main(["--no-grammar", "list", "files"])
+        assert rc == 0
+        assert seen["cfg"]["use_grammar"] is False
+
+    def test_debug_emits_prompt_to_stderr(self, monkeypatch, tmp_path, capsys):
+        self._isolate(monkeypatch, tmp_path)
+        # Only assert the debug output, not actual execution.
+        monkeypatch.setattr(cli.engine, "generate",
+                            lambda *a, **k: (["ls"], 0.01, "server"))
+        monkeypatch.setattr(cli.engine.hostctx, "build",
+                            lambda p, enabled=True, cwd=None: ("SYS", p))
+        rc = cli.main(["--debug", "list", "files"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "--debug" in err
+        assert "list files" in err
+
+    def test_debug_shows_grammar_when_available(self, monkeypatch, tmp_path, capsys):
+        self._isolate(monkeypatch, tmp_path)
+        cli.main(["config", "--set", "host_context=true"])
+        capsys.readouterr()
+        monkeypatch.setattr(cli.engine, "generate",
+                            lambda *a, **k: (["ls"], 0.01, "server"))
+        monkeypatch.setattr(cli.engine.hostctx, "build",
+                            lambda p, enabled=True, cwd=None: ("SYS", p))
+        monkeypatch.setattr(cli.engine.hostctx, "stable_facts",
+                            lambda *a, **k: {"pkg": "pacman"})
+        # grammar_for_pkg may not exist (PR A vs PR B); if so, create a stub
+        # so the debug path can derive a grammar through the hasattr guard.
+        # raising=False restores the original after the test either way.
+        monkeypatch.setattr(cli.engine.hostctx, "grammar_for_pkg",
+                            lambda pkg: "grammar-blob", raising=False)
+        rc = cli.main(["--debug", "list", "files"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "--debug" in err
+        assert "grammar-blob" in err
+        assert "list files" in err
