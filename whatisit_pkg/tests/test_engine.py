@@ -553,7 +553,7 @@ class TestGenerateDiscardsTruncatedCandidates:
     def test_length_finish_reason_is_dropped(self, monkeypatch, tmp_path):
         self._fake_cfg_and_model(monkeypatch, tmp_path)
 
-        def fake_query_server(port, prompt, cfg, n, system=None):
+        def fake_query_server(port, prompt, cfg, n, system=None, grammar=None):
             return [
                 ("zip -r -9 -m -j -0 -1 -1 -1", "length"),   # truncated, has -m: drop
                 ("zip -r archive.zip .", "stop"),             # clean: keep
@@ -567,7 +567,7 @@ class TestGenerateDiscardsTruncatedCandidates:
     def test_degenerate_candidate_is_also_dropped_even_if_finished(self, monkeypatch, tmp_path):
         self._fake_cfg_and_model(monkeypatch, tmp_path)
 
-        def fake_query_server(port, prompt, cfg, n, system=None):
+        def fake_query_server(port, prompt, cfg, n, system=None, grammar=None):
             return [
                 ("zip -r -9 -q -n -j -0 -9 -n -j -0 -9 -n -j -0 -9 -n -j -0 a.zip .", "stop"),
                 ("zip -r archive.zip .", "stop"),
@@ -580,7 +580,7 @@ class TestGenerateDiscardsTruncatedCandidates:
     def test_duplicate_candidates_are_deduplicated(self, monkeypatch, tmp_path):
         self._fake_cfg_and_model(monkeypatch, tmp_path)
 
-        def fake_query_server(port, prompt, cfg, n, system=None):
+        def fake_query_server(port, prompt, cfg, n, system=None, grammar=None):
             return [("ls -la", "stop"), ("ls -la", "stop")]
         monkeypatch.setattr(engine, "_query_server", fake_query_server)
 
@@ -599,10 +599,26 @@ class TestGenerateDiscardsTruncatedCandidates:
                 captured["include_volatile"] = include_volatile
                 return ("SYSTEM PROMPT", prompt)
 
+            @staticmethod
+            def stable_facts():
+                return {"pkg": "unknown"}
+
+            @staticmethod
+            def postprocess_command(cmd, pkg_mgr):
+                return cmd
+
+            @staticmethod
+            def grammar_for_pkg(pkg_mgr):
+                return None
+
+            @staticmethod
+            def is_install_request(prompt):
+                return False
+
         monkeypatch.setattr(engine, "hostctx", CaptureHostCtx())
         monkeypatch.setattr(
             engine, "_query_server",
-            lambda port, prompt, cfg, n, system=None: [("ls -la", "stop")])
+            lambda port, prompt, cfg, n, system=None, grammar=None: [("ls -la", "stop")])
 
         engine.generate("list files", {}, **kwargs)
         assert captured["include_volatile"] is False
@@ -617,6 +633,18 @@ class _FakeHostCtx:
     @staticmethod
     def build(prompt, enabled=True, cwd=None, include_volatile=True):
         return ("SYSTEM PROMPT", prompt)
+    @staticmethod
+    def stable_facts():
+        return {"pkg": "unknown"}
+    @staticmethod
+    def postprocess_command(cmd, pkg_mgr):
+        return cmd
+    @staticmethod
+    def grammar_for_pkg(pkg_mgr):
+        return None
+    @staticmethod
+    def is_install_request(prompt):
+        return "install" in prompt
 
 
 class _FakeResp:
@@ -919,3 +947,97 @@ class TestRemoteWarnings:
     def test_invalid_url_reported(self):
         w = engine.remote_warnings({"base_url": "not-a-url", "api_key": ""})
         assert any("invalid" in x for x in w)
+
+
+class TestGenerateGrammarAndPostprocess:
+    """generate() must pass the GBNF grammar to the local backends and run each
+    extracted command through hostctx.postprocess_command using the host pkg.
+    """
+
+    def _fake_cfg_and_model(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
+        srv = tmp_path / "llama-server"
+        srv.write_bytes(b"fake")
+        monkeypatch.setenv("WHATISIT_LLAMA_SERVER", str(srv))
+        monkeypatch.setattr(engine, "start_server", lambda *a, **kw: 12345)
+
+    def test_passes_grammar_to_query_server(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+
+        class FakeHost:
+            @staticmethod
+            def build(prompt, enabled=True, cwd=None, include_volatile=True):
+                return ("SYS", prompt)
+            @staticmethod
+            def stable_facts():
+                return {"pkg": "pacman"}
+            @staticmethod
+            def grammar_for_pkg(pkg_mgr):
+                return "fake-grammar"
+            @staticmethod
+            def is_install_request(prompt):
+                return True
+            @staticmethod
+            def postprocess_command(cmd, pkg_mgr):
+                assert pkg_mgr == "pacman"
+                return cmd
+
+        monkeypatch.setattr(engine, "hostctx", FakeHost())
+        captured = {}
+        def fake_query_server(port, prompt, cfg, n, system=None, grammar=None):
+            captured["grammar"] = grammar
+            return [("pacman -S htop", "stop")]
+        monkeypatch.setattr(engine, "_query_server", fake_query_server)
+
+        cmds, _, mode = engine.generate("install htop", {}, n=1)
+        assert captured["grammar"] == "fake-grammar"
+        assert mode == "server"
+
+    def test_postprocesses_wrong_distro_syntax(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        # Drive postprocessing with the real implementation, pinned to pacman.
+        monkeypatch.setattr(engine.hostctx, "build",
+                            lambda p, enabled=True, cwd=None, include_volatile=True: ("SYS", p))
+        monkeypatch.setattr(engine.hostctx, "stable_facts",
+                            lambda *a, **k: {"pkg": "pacman"})
+        monkeypatch.setattr(engine.hostctx, "grammar_for_pkg",
+                            lambda pkg_mgr: None)
+        monkeypatch.setattr(engine, "_query_server",
+                            lambda *a, **k: [("apt-get install -y htop", "stop")])
+        cmds, _, _ = engine.generate("install htop", {}, n=1)
+        assert cmds == ["pacman -S htop"]
+
+    def test_oneshot_passes_prompts_and_grammar_via_files(self, monkeypatch, tmp_path):
+        """_query_oneshot must not put the prompt/system/grammar on the argv:
+        llama-cli's command line is visible to any co-tenant via `ps`."""
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        cli = tmp_path / "llama-cli"
+        cli.write_bytes(b"fake")
+
+        captured = {}
+        class _Proc:
+            returncode = 0
+            stdout = "> install htop\npacman -S htop\n[ Prompt: 12 tokens ]\n"
+            stderr = ""
+        def fake_run(cmd, **kw):
+            captured["cmd"] = list(cmd)
+            return _Proc()
+
+        monkeypatch.setattr(engine.subprocess, "run", fake_run)
+        engine._query_oneshot(model, cli, "install htop", {}, threads=1,
+                              system="SYS", grammar="GBNF")
+
+        cmd = captured["cmd"]
+        assert "--file" in cmd and "--system-prompt-file" in cmd and "--grammar-file" in cmd
+        # The raw prompt, system prompt and grammar must never appear as argv
+        # elements, only as paths to private files.
+        assert "install htop" not in cmd
+        assert "SYS" not in cmd
+        assert "GBNF" not in cmd
+        # The files themselves must be 0600 and cleaned up afterwards.
+        for flag in ("--file", "--system-prompt-file", "--grammar-file"):
+            path = cmd[cmd.index(flag) + 1]
+            assert not os.path.exists(path)

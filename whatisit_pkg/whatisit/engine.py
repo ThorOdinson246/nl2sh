@@ -30,6 +30,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -745,16 +746,20 @@ def list_remote_models(remote: dict, timeout: float = 5.0) -> list[str]:
 
 
 def _query_server(port: int, prompt: str, cfg: dict, n: int,
-                  system: str | None = None) -> list[str]:
+                  system: str | None = None,
+                  grammar: str | None = None) -> list[str]:
     """Greedy answer first, then sampled alternatives (see _greedy_then_sample).
 
     The llama-specific penalties stay on the server body only -- they are what
     the local model needs to avoid flag-spam loops, and remote endpoints do not
-    all accept them.
+    all accept them. An optional GBNF ``grammar`` constrains the model to the
+    host's package-manager syntax when the request is an install.
     """
     base = _std_body(system or cfg_mod.SYSTEM_PROMPT, prompt, cfg)
     base["repeat_penalty"] = cfg.get("repeat_penalty", 1.08)
     base["repeat_last_n"] = 64
+    if grammar:
+        base["grammar"] = grammar
     return _greedy_then_sample(base, n, float(cfg.get("temperature", 0.0)),
                                lambda b: _post(port, b))
 
@@ -796,12 +801,50 @@ def _query_remote(remote: dict, prompt: str, cfg: dict, n: int,
 
 
 def _query_oneshot(model: Path, cli_bin: Path, prompt: str, cfg: dict, threads: int,
-                   system: str | None = None) -> list[str]:
-    cmd = [str(cli_bin), "-m", str(model), "-sys", system or cfg_mod.SYSTEM_PROMPT, "-p", prompt,
-           "-st", "--no-display-prompt", "--no-warmup",
-           "--temp", str(cfg.get("temperature", 0.0)),
-           "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads)]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=_runtime_env(), timeout=300)
+                   system: str | None = None,
+                   grammar: str | None = None) -> list[str]:
+    """One-shot generation via a single llama-cli invocation.
+
+    The prompt, system prompt and grammar all go through 0o600 temp files, not
+    argv: llama-cli's command line is visible to any co-tenant via `ps`, and
+    the prompt carries the user's request text plus the host-facts block.
+    """
+    sys_file = gram_file = prm_file = None
+    try:
+        prm_file = tempfile.NamedTemporaryFile(
+            mode='w', delete=False, suffix='.txt')
+        prm_file.write(prompt)
+        prm_file.close()
+
+        sys_file = tempfile.NamedTemporaryFile(
+            mode='w', delete=False, suffix='.txt')
+        sys_file.write(system or cfg_mod.SYSTEM_PROMPT)
+        sys_file.close()
+
+        cmd = [str(cli_bin), "-m", str(model), "--file", prm_file.name,
+               "-st", "--no-display-prompt", "--no-warmup",
+               "--temp", str(cfg.get("temperature", 0.0)),
+               "-n", str(cfg.get("max_tokens", 64)), "-t", str(threads)]
+
+        cmd.extend(["--system-prompt-file", sys_file.name])
+
+        if grammar:
+            gram_file = tempfile.NamedTemporaryFile(
+                mode='w', delete=False, suffix='.gbnf')
+            gram_file.write(grammar)
+            gram_file.close()
+            cmd.extend(["--grammar-file", gram_file.name])
+
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           env=_runtime_env(), timeout=300)
+    finally:
+        if prm_file:
+            os.unlink(prm_file.name)
+        if sys_file:
+            os.unlink(sys_file.name)
+        if gram_file:
+            os.unlink(gram_file.name)
+
     if p.returncode != 0:
         raise RuntimeError(f"llama-cli rc={p.returncode}: {p.stderr[-400:]}")
     # one-shot mode gives no finish_reason; treat as unknown
@@ -848,12 +891,19 @@ def looks_degenerate(cmd: str, min_repeats: int = 4) -> bool:
     return bool(counts) and counts.most_common(1)[0][1] >= min_repeats
 
 
-def _collect_commands(raws) -> list[str]:
-    """Extract, drop bad/finished/duplicate candidates (shared by all modes)."""
+def _collect_commands(raws, host_pkg: str = "unknown") -> list[str]:
+    """Extract, drop bad/finished/duplicate candidates (shared by all modes).
+
+    If host_pkg is known, apply distro-aware postprocessing as a backstop.
+    """
     cmds, seen = [], set()
     for raw, finish in raws:
         c = extract(raw)
         if not c or c in seen:
+            continue
+        if host_pkg != "unknown":
+            c = hostctx.postprocess_command(c, host_pkg)
+        if c in seen:
             continue
         # A generation that stopped because it ran out of budget is not a
         # finished command, and must not be presented as one. The observed case
@@ -915,18 +965,37 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         prompt, enabled=cfg.get("host_context", True),
         include_volatile=not (for_execution or quiet))
 
+    # GBNF grammar + distro-aware postprocessing: constrain install verbs to the
+    # host's package manager and rewrite any wrong-distro syntax as a backstop.
+    # Host-package detection runs whenever host context is on -- it feeds the
+    # postprocess backstop. The grammar is gated on BOTH install-intent and
+    # use_grammar (--no-grammar turns only the constraint off), so a GBNF that
+    # turns out to reject a valid command form must not disable the rewrite
+    # path, and a non-install query is never grammar-constrained at all.
+    host_pkg = "unknown"
+    grammar = None
+    if cfg.get("host_context", True):
+        try:
+            host_pkg = hostctx.stable_facts().get("pkg", "unknown")
+        except (OSError, UnicodeDecodeError):
+            pass
+        if (cfg.get("use_grammar", True) and host_pkg != "unknown"
+                and hostctx.is_install_request(prompt)):
+            grammar = hostctx.grammar_for_pkg(host_pkg)
+
     t0 = time.time()
     if server_bin is not None:
         port = start_server(model, server_bin, threads, quiet=quiet)
-        raws = _query_server(port, user_msg, cfg, n, system=system)
+        raws = _query_server(port, user_msg, cfg, n, system=system, grammar=grammar)
         mode = "server"
     else:
         cli = cfg_mod.find_llama_cli()
         if cli is None:
             raise FileNotFoundError(
                 "neither llama-server nor llama-cli found -- run `whatisit doctor`")
-        raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system)
+        raws = _query_oneshot(model, cli, user_msg, cfg, threads, system=system,
+                              grammar=grammar)
         mode = "oneshot"
 
-    cmds = _collect_commands(raws)
+    cmds = _collect_commands(raws, host_pkg)
     return cmds, time.time() - t0, mode

@@ -78,3 +78,7 @@ hooks/
 # pip build
 whatisit_pkg/build/
 whatisit_pkg/dist/
+
+# Coverage databases from a local pytest run.
+.coverage
+.coverage.*

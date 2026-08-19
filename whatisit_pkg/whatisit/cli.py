@@ -119,6 +119,13 @@ def cmd_query(args, cfg: dict) -> int:
         print("whatisit: nothing to do -- give me a request in plain English", file=sys.stderr)
         return 2
 
+    # Per-invocation overrides from CLI flags. These win over the saved config
+    # file but do not persist to it (that is `whatisit config --set`'s job).
+    if args.host_context is not None:
+        cfg["host_context"] = args.host_context
+    if args.grammar is not None:
+        cfg["use_grammar"] = args.grammar
+
     # Remote mode sends the request (and host context, if enabled) somewhere
     # else, which is the one thing this tool otherwise promises never to do.
     # The warning is opt-in and goes to stderr so -q/$(...) output stays clean.
@@ -665,6 +672,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-t", "--timing", action="store_true", help="report latency")
     ap.add_argument("--oneshot", action="store_true",
                     help="bypass the resident server (slower; for debugging)")
+    ap.add_argument("--host-context", dest="host_context", action="store_true",
+                    help="enable host context for this invocation")
+    ap.add_argument("--no-host-context", dest="host_context", action="store_false",
+                    help="disable host context for this invocation")
+    ap.add_argument("--grammar", dest="grammar", action="store_true",
+                    help="enable the GBNF grammar for this invocation")
+    ap.add_argument("--no-grammar", dest="grammar", action="store_false",
+                    help="disable the GBNF grammar for this invocation")
 
     sub = ap.add_subparsers(dest="sub")
     s = sub.add_parser("setup", help="first-run setup: fetch the runtime and model")
@@ -694,7 +709,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 SUBCOMMANDS = {"setup", "doctor", "stop", "config"}
-_FLAGS_NOARG = {"-e", "--execute", "-q", "--quiet", "-t", "--timing", "--oneshot"}
+_FLAGS_NOARG = {"-e", "--execute", "-q", "--quiet", "-t", "--timing", "--oneshot",
+                "--host-context", "--no-host-context",
+                "--grammar", "--no-grammar"}
 _FLAGS_ARG = {"-n", "--num"}
 
 
@@ -715,6 +732,7 @@ class QueryArgs:
     def __init__(self, argv: list[str]):
         self.num, self.execute, self.quiet = 1, False, False
         self.timing, self.oneshot = False, False
+        self.host_context, self.grammar = None, None
         i = 0
         while i < len(argv):
             a = argv[i]
@@ -722,10 +740,19 @@ class QueryArgs:
                 i += 1
                 break
             if a in _FLAGS_NOARG:
-                setattr(self, {"-e": "execute", "--execute": "execute",
-                               "-q": "quiet", "--quiet": "quiet",
-                               "-t": "timing", "--timing": "timing",
-                               "--oneshot": "oneshot"}[a], True)
+                if a == "--host-context":
+                    self.host_context = True
+                elif a == "--no-host-context":
+                    self.host_context = False
+                elif a == "--grammar":
+                    self.grammar = True
+                elif a == "--no-grammar":
+                    self.grammar = False
+                else:
+                    setattr(self, {"-e": "execute", "--execute": "execute",
+                                   "-q": "quiet", "--quiet": "quiet",
+                                   "-t": "timing", "--timing": "timing",
+                                   "--oneshot": "oneshot"}[a], True)
             elif a in _FLAGS_ARG:
                 if i + 1 >= len(argv):
                     raise ValueError(f"{a} needs a number")
