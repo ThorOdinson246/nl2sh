@@ -1310,6 +1310,15 @@ def _shell_command_string(verb: str, args: list[str]) -> str | None:
     return None
 
 
+# shlex accumulates a token with `self.token = self.token + ch`, which is
+# quadratic in the length of a SINGLE token. A remote endpoint is allowed to
+# return up to engine._MAX_RESPONSE_BYTES, so one long unbroken line would sit
+# in check() for hours. Measured: 200k chars 0.75s, 400k 2.3s, 800k 10.8s.
+# No real command is anywhere near this, and truncating only ever hides
+# findings from the tail -- a rule that matches the visible prefix still fires.
+_MAX_COMMAND_CHARS = 4096
+
+
 def check(command: str) -> list[tuple[str, str]]:
     """Return [(severity, reason)]. Empty means nothing flagged.
 
@@ -1317,6 +1326,7 @@ def check(command: str) -> list[tuple[str, str]]:
     """
     if not command or not command.strip():
         return []
+    command = command[:_MAX_COMMAND_CHARS]
     clean = _normalize_shell_input(_strip_control(command))
     # Placeholders are documentation, not shell syntax: the `>` inside
     # `docker exec -it <container-id> sh` was once read as a redirect into /bin.
