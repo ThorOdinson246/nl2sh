@@ -149,6 +149,9 @@ class TestCmdQueryQuietDangerRefusal:
 
         monkeypatch.setattr(cli.engine, "generate", fake_generate)
         monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+        # -e is refused outright on Windows (exit 7) before the no-tty
+        # confirmation path (exit 6) is reached, so pin the platform.
+        monkeypatch.setattr(cli, "_is_windows", lambda: False)
         assert cli.main(["-e", "list", "files"]) == 6
         assert captured["for_execution"] is True
 

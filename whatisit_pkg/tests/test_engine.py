@@ -128,6 +128,13 @@ class TestWritePrivate:
 # --------------------------------------------------------- TCP authentication
 
 class TestTcpServerIdentity:
+    @pytest.fixture(autouse=True)
+    def _socket_inspection_available(self, monkeypatch):
+        # These exercise the attribution logic itself, not whether the host can
+        # inspect sockets. Without this they depend on /proc or lsof existing --
+        # false on Windows, and in a minimal container.
+        monkeypatch.setattr(engine, "_can_inspect_sockets", lambda: True)
+
     @pytest.mark.parametrize(
         ("checker", "args", "state"),
         [
