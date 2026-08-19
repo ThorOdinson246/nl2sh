@@ -262,7 +262,8 @@ interpreter, crontab wipes, firewall flushes, private key exposure, reverse
 shells, credential exfiltration, and the same patterns hidden behind `sudo`,
 `env`, `nohup`, quoting tricks or `..` traversal. Findings come back as
 `DANGER` (never auto-run) or `CAUTION` (warned, still yours to approve). 477
-safety checks run in CI on Python 3.9 through 3.12.
+regression cases run in CI on Python 3.9 through 3.13, on Linux, macOS and
+Windows.
 
 It's a denylist over a Turing-complete language, not a sandbox. Every rule in
 it came from a command this model actually produced during testing, which means
