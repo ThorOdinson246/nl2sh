@@ -25,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -41,6 +42,11 @@ from .extract import extract
 
 HOST = "127.0.0.1"
 STOP = ["\n", "<|im_end|>", "```"]
+_OWNER_WAIT_MAX = 2.0
+_TCP_INSPECTION_ERROR = (
+    "TCP transport requires /proc or lsof to attribute the server connection; "
+    "use the UNIX socket transport instead"
+)
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -127,12 +133,14 @@ def _request(endpoint: str, body: dict | None = None, timeout: float = 120.0):
         finally:
             conn.close()
 
-    port = running_port()
-    if port is None:
+    state = _tcp_server_state()
+    if state is None:
         raise RuntimeError("no running whatisit server")
-    req = urllib.request.Request(f"http://{HOST}:{port}{endpoint}", data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        payload = _read_capped(r)
+    port, pid = state
+    status, payload = _verified_tcp_request(
+        port, pid, endpoint, data=data, headers=headers, timeout=timeout)
+    if status != 200:
+        raise RuntimeError(f"server returned {status}: {payload[:200]!r}")
     return json.loads(payload) if payload else {}
 
 
@@ -204,32 +212,220 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _alive(port: int | None = None, timeout: float = 0.6) -> bool:
-    sp = _state_dir() / "server.sock"
-    if sp.exists():
+def _pid_owns_tcp_port(pid: int, port: int) -> bool:
+    """Confirm that ``pid`` owns the listening socket before sending the token.
+
+    TCP fallback cannot hold the port open while llama-server binds it. A local
+    process can therefore win that race, but it must never receive our API key
+    or be accepted as the model server. Linux exposes socket ownership through
+    /proc; macOS and other POSIX hosts use lsof when it is available.
+    """
+    proc_fd = Path(f"/proc/{pid}/fd")
+    if proc_fd.is_dir():
         try:
-            _request("/health", timeout=timeout)
-            return True
-        except Exception:
+            inodes = set()
+            for fd in proc_fd.iterdir():
+                try:
+                    target = os.readlink(str(fd))
+                except OSError:  # an fd can close while /proc is being walked
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+            for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+                try:
+                    lines = table.read_text().splitlines()[1:]
+                except OSError:
+                    continue
+                for line in lines:
+                    fields = line.split()
+                    if len(fields) < 10 or fields[3] != "0A" or fields[9] not in inodes:
+                        continue
+                    if int(fields[1].rsplit(":", 1)[1], 16) == port:
+                        return True
             return False
-    if port is None:
+        except (OSError, ValueError, IndexError):
+            pass
+
+    lsof = shutil.which("lsof")
+    if not lsof:
         return False
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{port}/health", timeout=timeout) as r:
-            return r.status == 200
+        p = subprocess.run(
+            [lsof, "-nP", "-a", "-p", str(pid), f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+            capture_output=True, text=True, timeout=1.0)
+        return p.returncode == 0 and f"p{pid}" in p.stdout.splitlines()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _pid_owns_tcp_connection(pid: int, server_port: int, client_port: int) -> bool:
+    """Confirm that ``pid`` owns this exact established loopback connection."""
+    proc_fd = Path(f"/proc/{pid}/fd")
+    if proc_fd.is_dir():
+        try:
+            inodes = set()
+            for fd in proc_fd.iterdir():
+                try:
+                    target = os.readlink(str(fd))
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+            for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+                try:
+                    lines = table.read_text().splitlines()[1:]
+                except OSError:
+                    continue
+                for line in lines:
+                    fields = line.split()
+                    if len(fields) < 10 or fields[3] != "01" or fields[9] not in inodes:
+                        continue
+                    local_port = int(fields[1].rsplit(":", 1)[1], 16)
+                    remote_port = int(fields[2].rsplit(":", 1)[1], 16)
+                    if local_port == server_port and remote_port == client_port:
+                        return True
+            return False
+        except (OSError, ValueError, IndexError):
+            pass
+
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return False
+    try:
+        p = subprocess.run(
+            [lsof, "-nP", "-a", "-p", str(pid), f"-iTCP:{server_port}",
+             "-sTCP:ESTABLISHED", "-Fn"],
+            capture_output=True, text=True, timeout=1.0)
+        if p.returncode != 0:
+            return False
+        for line in p.stdout.splitlines():
+            if not line.startswith("n") or "->" not in line:
+                continue
+            local, remote = line[1:].split("->", 1)
+            remote = remote.split(" ", 1)[0]
+            if (local.endswith(f":{server_port}")
+                    and remote.endswith(f":{client_port}")):
+                return True
+        return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _can_inspect_sockets() -> bool:
+    """Return whether this host exposes a supported socket ownership API."""
+    return Path("/proc/net/tcp").exists() or shutil.which("lsof") is not None
+
+
+def _wait_for_tcp_connection_owner(pid: int, server_port: int, client_port: int,
+                                   timeout: float) -> bool:
+    """Wait briefly for the server to accept a just-established connection."""
+    if not _can_inspect_sockets():
+        return False
+    deadline = time.monotonic() + min(max(timeout, 0), _OWNER_WAIT_MAX)
+    while True:
+        if _pid_owns_tcp_connection(pid, server_port, client_port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+
+def _verified_tcp_request(port: int, expected_pid: int, endpoint: str,
+                          data: bytes | None = None, headers: dict | None = None,
+                          timeout: float = 120.0) -> tuple[int, bytes]:
+    """Send one request only after attributing its connection to our server."""
+    if not _can_inspect_sockets():
+        raise RuntimeError(_TCP_INSPECTION_ERROR)
+    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
+    try:
+        # Connect first without transmitting HTTP headers or a body.  The
+        # server-side socket for this exact connection must belong to the saved
+        # llama-server PID before credentials or prompt data can leave us.
+        conn.connect()
+        if conn.sock is None:
+            raise RuntimeError("TCP connection has no socket")
+        client_port = conn.sock.getsockname()[1]
+        if not _wait_for_tcp_connection_owner(expected_pid, port, client_port, timeout):
+            raise RuntimeError("TCP connection is not owned by the expected llama-server")
+        conn.request("POST" if data else "GET", endpoint, body=data, headers=headers or {})
+        response = conn.getresponse()
+        return response.status, _read_capped(response)
+    finally:
+        conn.close()
+
+
+def _probe_status(endpoint: str, token: str, port: int | None,
+                  expected_pid: int | None, timeout: float) -> int | None:
+    """Return an authenticated GET's status over the configured transport."""
+    headers = {"Authorization": f"Bearer {token}"}
+    sp = _sock_path()
+    if sp.exists():
+        conn = _UnixHTTPConnection(str(sp), timeout=timeout)
+        try:
+            conn.request("GET", endpoint, headers=headers)
+            response = conn.getresponse()
+            _read_capped(response)
+            return response.status
+        finally:
+            conn.close()
+    if port is None or expected_pid is None:
+        return None
+    status, _ = _verified_tcp_request(
+        port, expected_pid, endpoint, headers=headers, timeout=timeout)
+    return status
+
+
+def _alive(port: int | None = None, timeout: float = 0.6,
+           expected_pid: int | None = None) -> bool:
+    sp = _state_dir() / "server.sock"
+    if not sp.exists():
+        if port is None:
+            return False
+        if not _can_inspect_sockets():
+            raise RuntimeError(_TCP_INSPECTION_ERROR)
+        if expected_pid is None or not _pid_owns_tcp_port(expected_pid, port):
+            return False
+    token = _read_token()
+    if not token:
+        return False
+    try:
+        # /health and /v1/models are public in llama-server. /props is
+        # side-effect-free and protected, so require proof that authentication
+        # is both enforced and accepts the configured token.
+        wrong_token = secrets.token_urlsafe(24)
+        while secrets.compare_digest(wrong_token, token):
+            wrong_token = secrets.token_urlsafe(24)
+        return (_probe_status("/props", wrong_token, port, expected_pid, timeout) == 401
+                and _probe_status("/props", token, port, expected_pid, timeout) == 200)
     except Exception:
         return False
 
 
-def running_port() -> int | None:
+def _tcp_server_state() -> tuple[int, int] | None:
+    """Return the recorded TCP port and PID after validating process identity."""
     p = _port_file()
     if not p.exists():
         return None
     try:
         port = int(p.read_text().strip())
-    except ValueError:
+        pid = int((_state_dir() / "server.pid").read_text().strip())
+    except (OSError, ValueError):
         return None
-    return port if _alive(port) else None
+    return (port, pid) if _is_our_server(pid) else None
+
+
+def running_port() -> int | None:
+    state = _tcp_server_state()
+    if state is None:
+        return None
+    port, pid = state
+    try:
+        return port if _alive(port, expected_pid=pid) else None
+    except RuntimeError:
+        # A recorded port we cannot attribute to a pid is a port we will not
+        # talk to, which is the same answer as "nothing is running". This is a
+        # status query -- `doctor` calls it -- so it must not raise.
+        return None
 
 
 def _is_our_server(pid: int) -> bool:
@@ -243,7 +439,16 @@ def _is_our_server(pid: int) -> bool:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
         cmdline = raw.replace(b"\x00", b" ").decode(errors="replace")
     except OSError:
-        return False
+        # macOS has no /proc. ps is used only to inspect one already-known pid;
+        # argument vectors are still passed without a shell.
+        try:
+            p = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                               capture_output=True, text=True, timeout=1.0)
+            if p.returncode != 0:
+                return False
+            cmdline = p.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     return "llama-server" in cmdline
 
 
@@ -267,8 +472,20 @@ def stop_server() -> bool:
 
 def start_server(model: Path, server_bin: Path, threads: int,
                  wait: float = 180.0, quiet: bool = False) -> int:
-    if _alive(running_port()):
-        return running_port() or 0
+    if _sock_path().exists() and _alive():
+        return 0
+    if (existing := running_port()) is not None:
+        return existing
+
+    # The UNIX socket is preferred (see _UnixHTTPConnection), but older
+    # llama-server builds read --host as a hostname and fail to bind, so the
+    # transport has to be settable. TCP is safe only when its socket owner can
+    # be verified before any credential or prompt data is sent.
+    use_socket = (cfg_mod.env("FORCE_TCP") != "1"
+                  and not cfg_mod.load_config().get("force_tcp"))
+    if not use_socket and not _can_inspect_sockets():
+        raise RuntimeError(_TCP_INSPECTION_ERROR)
+
     sd = _state_dir()
     log = sd / "server.log"
 
@@ -277,29 +494,35 @@ def start_server(model: Path, server_bin: Path, threads: int,
     token = secrets.token_urlsafe(24)
     _write_private(_token_path(), token)
 
-    # The UNIX socket is preferred (see _UnixHTTPConnection), but older
-    # llama-server builds read --host as a hostname and fail to bind, so the
-    # transport has to be settable. The token below applies either way.
-    use_socket = (cfg_mod.env("FORCE_TCP") != "1"
-                  and not cfg_mod.load_config().get("force_tcp"))
     if use_socket:
         sp = _sock_path()
         sp.unlink(missing_ok=True)
         port = 0
         cmd = [str(server_bin), "-m", str(model), "--host", str(sp),
-               "-t", str(threads), "-c", "2048", "--no-webui", "--api-key", token]
+               "-t", str(threads), "-c", "2048", "--no-webui"]
     else:
         port = _free_port()
         cmd = [str(server_bin), "-m", str(model), "--host", HOST, "--port", str(port),
-               "-t", str(threads), "-c", "2048", "--no-webui", "--api-key", token]
+               "-t", str(threads), "-c", "2048", "--no-webui"]
     # The server log records the launch command line and can contain prompt
     # text; it gets the same owner-only treatment as the pid and token.
-    if not log.exists():
-        os.close(os.open(str(log), os.O_WRONLY | os.O_CREAT, 0o600))
-    with open(log, "ab") as lf:
+    log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if os.name != "nt":
+        log_flags |= os.O_NOFOLLOW
+    log_fd = os.open(str(log), log_flags, 0o600)
+    try:
+        os.fchmod(log_fd, 0o600)
+    except (OSError, AttributeError):
+        pass
+    launch_env = _runtime_env()
+    # llama-server documents LLAMA_API_KEY as the environment equivalent of
+    # --api-key. Keeping the secret out of argv also keeps it out of ps output
+    # and out of the launch command recorded below.
+    launch_env["LLAMA_API_KEY"] = token
+    with os.fdopen(log_fd, "ab") as lf:
         lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(cmd)}\n".encode())
         proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
-                                env=_runtime_env(), start_new_session=True)
+                                env=launch_env, start_new_session=True)
     _write_private(sd / "server.pid", str(proc.pid))
     if port:
         _write_private(_port_file(), str(port))
@@ -311,7 +534,7 @@ def start_server(model: Path, server_bin: Path, threads: int,
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"llama-server exited rc={proc.returncode}; see {log}")
-        if _alive(port or None):
+        if _alive(port or None, expected_pid=proc.pid if port else None):
             if not quiet:
                 print(" ready.", file=sys.stderr, flush=True)
             return port
@@ -645,7 +868,7 @@ def _collect_commands(raws) -> list[str]:
 
 
 def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
-             quiet: bool = False) -> tuple[list[str], float, str]:
+             quiet: bool = False, for_execution: bool = False) -> tuple[list[str], float, str]:
     """Return (commands, elapsed_seconds, mode). Commands are already extracted.
 
     mode is one of "remote", "server", or "oneshot". Remote mode is selected by
@@ -660,7 +883,12 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
         if force_oneshot:
             raise RuntimeError(
                 "--oneshot applies to the local backend and cannot be used with a remote endpoint")
-        system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+        # -e and -q feed a shell. The volatile block carries filenames from the
+        # cwd, which the user did not type, so it is withheld from the two
+        # flows whose output can run. Ordinary suggestions still get it.
+        system, user_msg = hostctx.build(
+            prompt, enabled=cfg.get("host_context", True),
+            include_volatile=not (for_execution or quiet))
         t0 = time.time()
         raws = _query_remote(remote, user_msg, cfg, n, system=system)
         return _collect_commands(raws), time.time() - t0, "remote"
@@ -683,7 +911,9 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
     # Host context defaults ON: it is prefix-cached, so it costs one-time
     # prefill rather than per-query latency, and it removed a whole class of
     # placeholder / wrong-tool failures. cfg["host_context"]=false disables it.
-    system, user_msg = hostctx.build(prompt, enabled=cfg.get("host_context", True))
+    system, user_msg = hostctx.build(
+        prompt, enabled=cfg.get("host_context", True),
+        include_volatile=not (for_execution or quiet))
 
     t0 = time.time()
     if server_bin is not None:

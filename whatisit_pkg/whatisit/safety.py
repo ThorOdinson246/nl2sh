@@ -75,7 +75,7 @@ DESTRUCTIVE_VERBS = {"rm", "rmdir", "shred", "unlink", "srm"}
 # treatment as the other wrappers.
 WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "command",
             "builtin", "exec", "time", "stdbuf", "setsid", "xargs",
-            "busybox", "toybox"}
+            "busybox", "toybox", "timeout"}
 
 # A second audit found the wrapper strip only ever removed the wrapper's own
 # NAME, not its options -- so `sudo -u root rm -rf /`, `env -i rm -rf /` and
@@ -86,18 +86,65 @@ WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "command",
 # (`-n19`, `--opt=val`, or a bare boolean flag) -- so the stripping loop can
 # skip exactly the tokens that belong to the wrapper and land on the real verb.
 WRAPPER_VALUE_OPTS = {
-    "sudo": {"-u", "-g", "-h", "-p", "-r", "-t", "-C"},
-    "doas": {"-u"},
-    "env": {"-u", "-C", "-S"},
-    "nice": {"-n"},
-    "ionice": {"-c", "-n", "-p", "-t"},
-    "stdbuf": {"-i", "-o", "-e"},
-    "xargs": {"-I", "-i", "-n", "-P", "-d", "-s", "-a", "-L", "-l"},
+    "sudo": {
+        "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+        "-r", "--role", "-t", "--type", "-C", "--close-from", "-D", "--chdir",
+        "-R", "--chroot", "-T", "--command-timeout", "-U", "--other-user",
+        "-a", "--auth-type", "-c", "--login-class",
+    },
+    "doas": {"-u", "-C", "-a"},
+    "env": {
+        "-a", "--argv0", "-u", "--unset", "-C", "--chdir",
+        "-S", "--split-string", "-P",
+    },
+    "nice": {"-n", "--adjustment"},
+    "ionice": {
+        "-c", "--class", "-n", "--classdata", "-p", "--pid",
+        "-P", "--pgid", "-u", "--uid",
+    },
+    "time": {"-f", "--format", "-o", "--output"},
+    "exec": {"-a"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "xargs": {
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-J", "-L",
+        "-n", "--max-args", "-P", "--max-procs",
+        "-R", "-S", "-s", "--max-chars", "--process-slot-var",
+    },
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+}
+
+# These long options accept an attached `=VALUE`, but a bare spelling does not
+# consume the next argv token.  In particular, GNU xargs treats bare
+# `--replace` as `--replace={}`; swallowing the following `rm` would hide the
+# command being run.  They still participate in abbreviation resolution so a
+# prefix cannot be mistaken for an unrelated boolean flag.
+WRAPPER_OPTIONAL_VALUE_OPTS = {
+    "sudo": {"--preserve-env"},
+    "xargs": {"-e", "-i", "-l", "--eof", "--replace", "--max-lines"},
 }
 
 # Shells that take a command as a STRING argument -- the string has to be
 # re-checked, or `bash -c "rm -rf /"` hides everything from the tokenizer.
-SHELL_RUNNERS = {"sh", "bash", "zsh", "ksh", "dash", "fish", "ash"}
+# csh/tcsh also execute stdin directly, so they belong to the remote-pipeline
+# interpreter check even when no -c operand is present.
+SHELL_RUNNERS = {"sh", "bash", "zsh", "ksh", "dash", "fish", "ash", "csh", "tcsh"}
+
+# Options that consume the following token while a shell is still parsing its
+# own arguments.  They must be skipped when looking for a later `-c`; the first
+# non-option after `-O`/`-o`, for example, is an option value, not a script.
+SHELL_VALUE_OPTS = {
+    "bash": {"-O", "+O", "-o", "+o", "--init-file", "--rcfile"},
+    "sh": {"-o", "+o"},
+    "zsh": {"-o", "+o"},
+    "ksh": {"-o", "+o"},
+    "dash": {"-o", "+o"},
+    "ash": {"-o", "+o"},
+    "fish": {"-C", "--init-command", "-d", "--debug", "--debug-output",
+             "--debug-stack-frames", "--features", "--profile", "--profile-startup"},
+}
+
+_UNPARSEABLE_ENV_SPLIT = "__whatisit_unparseable_env_split__"
+_UNPARSEABLE_WRAPPER_OPTION = "__whatisit_unparseable_wrapper_option__"
 
 # Individual files whose destruction breaks the system. The directory list above
 # does not cover them, so `shred -u /etc/passwd` and `unlink /etc/passwd` were
@@ -119,9 +166,111 @@ def _strip_control(s: str) -> str:
     return CONTROL_RE.sub("", s)
 
 
-ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
-_ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'",
-                   "0": "\0", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+def _normalize_shell_input(command: str) -> str:
+    r"""Apply quote/comment-aware pre-tokenization normalization.
+
+    POSIX shells delete an unquoted backslash followed by a newline before
+    recognizing words or operators.  The backslash keeps that meaning inside
+    double quotes, but both characters are literal inside single quotes.  Bash
+    ANSI-C quotes (``$'...'``) behave like the latter for a literal newline,
+    while still allowing an escaped quote inside the construct.
+
+    An unquoted ``#`` at the start of a word instead begins a comment.  Bash
+    treats backslashes as ordinary comment text, so its physical newline must
+    remain an operator rather than being joined to the comment.  Discarding the
+    comment itself also prevents its quote characters from confusing the
+    downstream, deliberately small shell scanner.
+
+    Keeping this pass quote-aware matters in both directions: joining
+    ``r\<newline>m`` is necessary to see the command Bash executes, while
+    joining either ``'r\<newline>m'`` or ``r\\<newline>m`` would inspect a
+    different command and create false positives.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    pending_dollar = False
+    word_start = True
+    i = 0
+
+    while i < len(command):
+        ch = command[i]
+
+        if quote == "single":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if quote == "ansi-c":
+            # ANSI-C quotes allow escaped quote delimiters.  Unlike an
+            # unquoted or double-quoted continuation, Bash preserves a
+            # backslash followed by a literal newline in this construct.
+            if ch == "\\" and i + 1 < len(command):
+                out.extend((ch, command[i + 1]))
+                i += 2
+                continue
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if quote is None and ch == "#" and word_start:
+            newline = command.find("\n", i + 1)
+            if newline < 0:
+                break
+            out.append("\n")
+            pending_dollar = False
+            word_start = True
+            i = newline + 1
+            continue
+
+        if ch == "\\" and i + 1 < len(command):
+            if command[i + 1] == "\n":
+                i += 2
+                continue
+            # Copy an escaped character as a pair so an escaped quote cannot
+            # accidentally change the state used for later continuations.
+            out.extend((ch, command[i + 1]))
+            pending_dollar = False
+            word_start = False
+            i += 2
+            continue
+
+        if quote == "double":
+            out.append(ch)
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+
+        if ch == "'":
+            quote = "ansi-c" if pending_dollar else "single"
+            pending_dollar = False
+            word_start = False
+        elif ch == '"':
+            quote = "double"
+            pending_dollar = False
+            word_start = False
+        elif ch == "$":
+            # Continuation removal can itself create a `$'...'` opener.  Pair
+            # consecutive dollars so `$$'...'` remains a PID expansion plus
+            # an ordinary single-quoted fragment, as Bash parses it.
+            pending_dollar = not pending_dollar
+            word_start = False
+        else:
+            pending_dollar = False
+            word_start = ch in " \t\n|&;()<>"
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
+_ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"',
+                   "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v"}
 
 
 def _decode_ansi_c(segment: str) -> str:
@@ -132,19 +281,112 @@ def _decode_ansi_c(segment: str) -> str:
     the critical-path check entirely, while a real shell runs `rm -rf /`. This
     decodes the common backslash escapes and re-quotes the result with
     `shlex.quote` so the rest of the pipeline sees the same string bash would.
+
+    `$'...'` only has ANSI-C meaning when it begins outside ordinary quotes.
+    Inside `"..."` or `'...'`, Bash treats those characters as literal text.
+    Decoding them there can inject quote delimiters into the scanner and hide a
+    later top-level operator, so matches are selected with a small quote-aware
+    pass rather than a context-free regex substitution.
     """
     def repl(m: re.Match) -> str:
         body, out, i = m.group(1), [], 0
         while i < len(body):
             c = body[i]
             if c == "\\" and i + 1 < len(body):
-                out.append(_ANSI_C_ESCAPES.get(body[i + 1], body[i + 1]))
+                esc = body[i + 1]
+                if esc in _ANSI_C_ESCAPES:
+                    out.append(_ANSI_C_ESCAPES[esc])
+                    i += 2
+                    continue
+                if esc in "01234567":
+                    end = i + 2
+                    while end < len(body) and end < i + 4 and body[end] in "01234567":
+                        end += 1
+                    # Bash stores octal escapes as one byte: values above 0377
+                    # wrap modulo 256 (`\457` is `/`, `\400` is NUL).
+                    out.append(chr(int(body[i + 1:end], 8) & 0xFF))
+                    i = end
+                    continue
+                widths = {"x": 2, "u": 4, "U": 8}
+                if esc in widths:
+                    end = i + 2
+                    limit = min(len(body), end + widths[esc])
+                    while end < limit and body[end] in "0123456789abcdefABCDEF":
+                        end += 1
+                    if end > i + 2:
+                        value = int(body[i + 2:end], 16)
+                        if value <= 0x10FFFF:
+                            out.append(chr(value))
+                            i = end
+                            continue
+                if esc == "c" and i + 2 < len(body):
+                    out.append(chr(ord(body[i + 2].upper()) & 0x1F))
+                    i += 3
+                    continue
+                # Bash leaves an unrecognized escape's backslash intact. Doing
+                # the same also avoids normalizing an unknown spelling into a
+                # different, potentially less suspicious target.
+                out.append("\\" + esc)
                 i += 2
             else:
                 out.append(c)
                 i += 1
-        return shlex.quote("".join(out))
-    return ANSI_C_QUOTE_RE.sub(repl, segment)
+        # Bash cannot put NUL in argv.  It truncates this ANSI-C fragment at
+        # the first decoded NUL, while adjacent shell word fragments still
+        # concatenate normally.  Truncate only this fragment before quoting so
+        # `$'/\0ignored'suffix` becomes `/suffix`, exactly as Bash executes it.
+        decoded = "".join(out).split("\x00", 1)[0]
+        return shlex.quote(decoded)
+
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if quote == '"':
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(segment):
+                # A backslash can protect a double-quote delimiter. Copy the
+                # pair without letting the second character alter our state.
+                out.append(segment[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < len(segment):
+            # An escaped dollar cannot begin ANSI-C quoting.
+            out.extend((ch, segment[i + 1]))
+            i += 2
+            continue
+        if ch == "'":
+            quote = "'"
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            quote = '"'
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "$" and (match := ANSI_C_QUOTE_RE.match(segment, i)):
+            out.append(repl(match))
+            i = match.end()
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _tokenize(segment: str) -> list[str]:
@@ -159,6 +401,196 @@ def _tokenize(segment: str) -> list[str]:
         return shlex.split(segment, posix=True)
     except ValueError:
         return segment.split()
+
+
+def _split_env_string(value: str) -> list[str] | None:
+    r"""Parse the operand of GNU/BSD ``env -S`` without shell semantics.
+
+    In particular, ``\_`` outside quotes separates arguments.  Returning None
+    for malformed or unsupported input lets the caller fail closed instead of
+    silently inspecting a different command from the one env will execute.
+    """
+    # env expands ${NAME} from its inherited environment.  That value can be
+    # the executable itself and is not reliably derivable from the command
+    # string, so dynamic split strings are deliberately rejected.
+    if re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", value):
+        return None
+
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    started = False
+    i = 0
+    escapes = {" ": " ", "\t": "\t", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+               "#": "#", "$": "$", '"': '"', "'": "'", "\\": "\\"}
+
+    def finish() -> None:
+        nonlocal current, started
+        if started:
+            tokens.append("".join(current))
+            current = []
+            started = False
+
+    while i < len(value):
+        ch = value[i]
+        if quote is None and ch in " \t":
+            finish()
+            i += 1
+            continue
+        if quote is None and ch == "#" and not started:
+            break
+        if ch in "'\"":
+            if quote is None:
+                quote = ch
+                started = True
+                i += 1
+                continue
+            if quote == ch:
+                quote = None
+                i += 1
+                continue
+        if ch != "\\":
+            current.append(ch)
+            started = True
+            i += 1
+            continue
+        if i + 1 >= len(value):
+            return None
+        esc = value[i + 1]
+        if quote == "'":
+            if esc in {"'", "\\"}:
+                current.append(esc)
+            else:
+                current.extend(("\\", esc))
+            started = True
+            i += 2
+            continue
+        if esc == "c":
+            if quote == '"':
+                return None
+            break
+        if esc == "_":
+            if quote == '"':
+                current.append(" ")
+                started = True
+            else:
+                finish()
+            i += 2
+            continue
+        if esc not in escapes:
+            return None
+        current.append(escapes[esc])
+        started = True
+        i += 2
+    if quote is not None:
+        return None
+    finish()
+    return tokens
+
+
+def _executable_name(token: str) -> str:
+    """Return a comparison-safe executable basename.
+
+    The default macOS filesystems resolve executable paths case-insensitively,
+    so ``/bin/BASH`` runs the same program as ``/bin/bash`` there.  Every
+    semantic command dispatch must use the same normalization or a case variant
+    can skip wrapper stripping or recursive shell inspection.
+    """
+    return token.rsplit("/", 1)[-1].casefold()
+
+
+def _strip_command_prefixes(tokens: list[str]) -> list[str]:
+    """Remove assignments, wrappers and wrapper options before a real command."""
+    toks = list(tokens)
+    while toks:
+        head = toks[0]
+        if ("=" in head and not head.startswith(("-", "/"))
+                and head.split("=", 1)[0].isidentifier()):
+            toks = toks[1:]
+            continue
+        base = _executable_name(head)
+        if base not in WRAPPERS:
+            break
+        toks = toks[1:]
+        value_opts = WRAPPER_VALUE_OPTS.get(base, set())
+        optional_value_opts = WRAPPER_OPTIONAL_VALUE_OPTS.get(base, set())
+        while toks:
+            # sudo alone permits environment assignments interspersed with its
+            # options and resumes option parsing afterwards.  If the assignment
+            # ended this loop, a later `-u root` would leave `root` looking like
+            # the executable and hide the actual command.
+            if (base == "sudo" and "=" in toks[0] and not toks[0].startswith(("-", "/"))
+                    and toks[0].split("=", 1)[0].isidentifier()):
+                toks = toks[1:]
+                continue
+            if toks[0] == "--" or not toks[0].startswith("-"):
+                break
+            opt = toks[0]
+            toks = toks[1:]
+            # sudo and GNU-style wrappers accept unambiguous abbreviations of
+            # long options.  Canonicalize a unique known value option before
+            # deciding whether to consume the following token; otherwise that
+            # value would look like the executable and hide the real command.
+            opt_name, separator, attached_value = opt.partition("=")
+            canonical_opt = opt_name
+            consumes_next = False
+            known_value_opts = value_opts | optional_value_opts
+            if opt_name.startswith("--") and opt_name not in known_value_opts:
+                matches = [full for full in known_value_opts
+                           if full.startswith("--") and full.startswith(opt_name)]
+                if len(matches) == 1:
+                    canonical_opt = matches[0]
+                elif len(matches) > 1:
+                    return [_UNPARSEABLE_WRAPPER_OPTION]
+            if canonical_opt in value_opts and not separator:
+                consumes_next = True
+
+            # A required short option can be the last member of a bundle.  In
+            # `sudo -Eu root ...`, `u` still consumes `root`; treating the whole
+            # bundle as self-contained leaves `root` looking like the command.
+            if opt.startswith("-") and not opt.startswith("--") and len(opt) > 2:
+                bundle = opt[1:]
+                for pos, letter in enumerate(bundle):
+                    short_opt = "-" + letter
+                    if short_opt in optional_value_opts:
+                        canonical_opt = short_opt
+                        attached_value = bundle[pos + 1:]
+                        consumes_next = False
+                        break
+                    if short_opt not in value_opts:
+                        continue
+                    canonical_opt = short_opt
+                    attached_value = bundle[pos + 1:]
+                    consumes_next = not bool(attached_value)
+                    break
+            if base == "env":
+                split_value = None
+                if canonical_opt in {"-S", "--split-string"} and attached_value:
+                    split_value = attached_value
+                elif canonical_opt in {"-S", "--split-string"} and consumes_next and toks:
+                    split_value, toks = toks[0], toks[1:]
+                if split_value is not None:
+                    # env inserts these words back into argv before choosing
+                    # the program.  Discarding the value hides the executable
+                    # in `env -S '/bin/bash'` and similar spellings.
+                    split_tokens = _split_env_string(split_value)
+                    if split_tokens is None:
+                        return [_UNPARSEABLE_ENV_SPLIT]
+                    toks = split_tokens + toks
+                    continue
+            # A required option argument is consumed even when it starts with
+            # '-'.  getopt/getopt_long do the same: treating such a value as a
+            # second option makes the checker inspect a different argv from the
+            # wrapper and can leave the value looking like the executable.
+            if consumes_next and toks:
+                toks = toks[1:]
+        if toks and toks[0] == "--":
+            toks = toks[1:]
+        if base == "timeout" and toks:
+            # timeout's first non-option operand is a duration; the following
+            # token is the command whose behavior the checker must inspect.
+            toks = toks[1:]
+    return toks
 
 
 def _norm_path(tok: str) -> str:
@@ -314,8 +746,13 @@ WHOLE_DANGER = [
     # took 5.5s, and check() runs on every candidate before it is printed.
     (re.compile(r"\w{0,16}\(\s{0,4}\)\s{0,4}\{[^}]{0,64}\|[^}]{0,64}&\s{0,4}\}\s{0,4};"),
      "fork bomb"),
-    (re.compile(r"\bmkfs(\.\w+)?\b"), "formats a filesystem"),
-    (re.compile(r"\bdd\b[^|;]*\bof=/dev/(sd|nvme|hd|vd|mmcblk)"), "writes raw to a block device"),
+    # Only executable names are case-folded here. Options and subcommands stay
+    # case-sensitive, matching the programs' own parsers. This matters on
+    # case-insensitive filesystems (notably the default macOS setup), where
+    # `MKFS.EXT4` and `GIT reset` resolve to the lowercase executables.
+    (re.compile(r"\b(?i:mkfs(?:\.\w+)?)\b"), "formats a filesystem"),
+    (re.compile(r"\b(?i:dd)\b[^|;]*\bof=/dev/(sd|nvme|hd|vd|mmcblk)"),
+     "writes raw to a block device"),
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd|mmcblk)"), "redirects over a block device"),
     # Block-device destroyers other than dd/mkfs. All take the device as a
     # bare argument, so this is a verb + device-path match rather than a flag
@@ -323,15 +760,18 @@ WHOLE_DANGER = [
     # are as final as `mkfs` but none of the prior checks named them.
     (re.compile(r"\b(wipefs|blkdiscard|sgdisk)\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"),
      "wipes a block device"),
-    (re.compile(r"\bcryptsetup\b[^|;]*\b(luksFormat|luksErase|erase)\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"),
+    (re.compile(r"\b(?i:cryptsetup)\b[^|;]*\b(luksFormat|luksErase|erase)\b"
+                r"[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"),
      "reformats/erases a block device"),
-    (re.compile(r"\bparted\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)[^|;]*\b(rm|mklabel)\b"),
+    (re.compile(r"\b(?i:parted)\b[^|;]*/dev/(sd|nvme|hd|vd|mmcblk)"
+                r"[^|;]*\b(rm|mklabel)\b"),
      "modifies the partition table of a block device"),
-    (re.compile(r"\b(shutdown|reboot|halt|poweroff|init\s+0|init\s+6)\b"),
+    (re.compile(r"\b(?:(?i:shutdown|reboot|halt|poweroff)|(?i:init)\s+[06])\b"),
      "shuts the machine down"),
-    (re.compile(r"\bgit\s+clean\b(?=[^|;]*-\w*[fx])(?=[^|;]*-\w*[dx])"),
+    (re.compile(r"\b(?i:git)\s+clean\b(?=[^|;]*-\w*[fx])(?=[^|;]*-\w*[dx])"),
      "git clean deletes untracked files irrecoverably"),
-    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards uncommitted work"),
+    (re.compile(r"\b(?i:git)\s+reset\s+--hard\b"),
+     "git reset --hard discards uncommitted work"),
     (re.compile(r"\b(history\s+-c|shred\s+.*\.bash_history)\b"), "erases shell history"),
     (re.compile(r"\bchmod\b[^|;]*\s0{3,4}\s+/\s*$"), "chmod 000 / makes the system unusable"),
     (re.compile(r"\btruncate\s+-s\s*0\s+/etc/(passwd|shadow|fstab|sudoers)\b"),
@@ -369,13 +809,15 @@ WHOLE_DANGER = [
     # Removes the account's home directory and mail spool along with the user.
     # `deluser` is Debian's front-end for the same operation. Synonyms are
     # listed explicitly: matching one spelling of a tool is not coverage of it.
-    (re.compile(r"\b(?:userdel|deluser)\b[^|;]*\s--?(?:r\b|remove-home|remove-all-files)"),
+    (re.compile(r"\b(?i:userdel|deluser)\b[^|;]*\s"
+                r"--?(?:r\b|remove-home|remove-all-files)"),
      "deletes the user account together with its home directory and files"),
     # Flushing every chain drops the rules that were permitting your own SSH
     # session. On a remote host with a default DROP policy this is a permanent
     # lockout needing console access to undo, so it is worth refusing to
     # auto-run even though a local reset is legitimate.
-    (re.compile(r"\biptables\b[^|;]*\s-[FX]\b|\bnft\s+flush\s+ruleset\b"),
+    (re.compile(r"\b(?i:iptables)\b[^|;]*\s-[FX]\b"
+                r"|\b(?i:nft)\s+flush\s+ruleset\b"),
      "flushes firewall rules -- can lock you out of a remote machine"),
     # A truncating redirect (`>`, not `>>`) or a tee without -a over
     # authorized_keys removes the key you are currently logged in with.
@@ -542,7 +984,7 @@ WHOLE_DANGER = [
     # `curl ... | python3 -` and `curl ... | perl` execute attacker-chosen code
     # exactly as completely.
     (re.compile(r"\b(?:curl|wget)\b[^|;]{0,200}\|\s{0,4}(?:sudo\s+)?"
-                r"(?:python\d?(?:\.\d+)?|perl|ruby|node|php)\b"),
+                r"(?:python\d?(?:\.\d+)?|perl|ruby|node|php)(?![\w.-])"),
      "pipes remote content straight into an interpreter"),
     # Process substitution and eval reach the same place without ever forming
     # a pipe, which is why the pipe-shaped rule above cannot see them.
@@ -640,21 +1082,241 @@ PLACEHOLDER_HINT = re.compile(
     r"\bcontainer[-_]id\b|example\.com|username/repo)")
 
 
+def _split_top_level(command: str) -> list[tuple[str, str | None]]:
+    """Return quote-aware ``(clause, following operator)`` pairs."""
+    # ANSI-C strings use single-quote delimiters but, unlike POSIX single
+    # quotes, allow `\'`.  Decode and safely re-quote them first so an escaped
+    # quote cannot make a later separator appear top-level.
+    command = _decode_ansi_c(command)
+    parts: list[tuple[str, str | None]] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    i = 0
+
+    while i < len(command):
+        ch = command[i]
+
+        if escaped:
+            current.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            current.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+
+        # `>|` is one force-clobber redirect token, not a redirect followed by
+        # a pipeline. Keep its pipe with the current clause. The same applies
+        # to `>&`, `<&`, and `&>`: the `&` belongs to the redirection operator,
+        # not to a background/AND-list separator.
+        if ch == "|" and current and current[-1] == ">":
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "&" and current and current[-1] in "><":
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "&" and i + 1 < len(command) and command[i + 1] == ">":
+            current.append(ch)
+            i += 1
+            continue
+        if ch in "|;&\n":
+            operator = ch
+            if i + 1 < len(command) and command[i + 1] == ch and ch in "&|":
+                operator += ch
+                i += 1
+            clause = "".join(current).strip()
+            if clause:
+                parts.append((clause, operator))
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    clause = "".join(current).strip()
+    if clause:
+        parts.append((clause, None))
+    return parts
+
+
 def split_segments(command: str) -> list[str]:
-    """Split on shell operators so each clause is judged on its own.
+    """Split on top-level shell operators so each clause is judged on its own.
 
     A correct first clause followed by a destructive one is a real observed
     failure mode, so every segment is checked independently. Patterns that must
     SEE an operator belong in WHOLE_DANGER instead.
 
-    A lone `|` is a pipe, but `>|` is bash's force-clobber redirect operator --
-    a single token, not "redirect then pipe". Splitting on that `|` tore
-    `: >|/etc/passwd` into `: >` and `/etc/passwd`, and neither half contains
-    both the redirect and the target, so the write got past every check that
-    looks for `>` followed by a critical path. The negative lookbehind keeps
-    `>|` intact while still splitting ordinary pipes and `||`.
+    Quotes are preserved so an operator inside ``bash -c '...'`` remains part
+    of the command string that the recursive shell-runner check inspects.
     """
-    return [s.strip() for s in re.split(r"\|\||&&|(?<!>)\|(?!\|)|[;&\n]", command) if s.strip()]
+    return [clause for clause, _ in _split_top_level(command)]
+
+
+def _pipelines(command: str) -> list[list[str]]:
+    """Return top-level pipelines without confusing ``||`` or quoted pipes."""
+    out: list[list[str]] = []
+    pipeline: list[str] = []
+    for clause, operator in _split_top_level(command):
+        pipeline.append(clause)
+        if operator != "|":
+            if len(pipeline) > 1:
+                out.append(pipeline)
+            pipeline = []
+    if len(pipeline) > 1:
+        out.append(pipeline)
+    return out
+
+
+def _is_code_interpreter(verb: str) -> bool:
+    """Recognize executable names that run source read from standard input.
+
+    Package managers commonly install version-suffixed names (``perl5.34``,
+    ``ruby3.2``, ``php8.3``), and macOS normally resolves executable paths
+    case-insensitively.  Match those real executable families without accepting
+    descriptive tools such as ``python-format`` or ``tclsh-helper``.
+    """
+    name = verb.casefold()
+    if name in SHELL_RUNNERS:
+        return True
+    return bool(re.fullmatch(
+        r"(?:python|pypy)(?:\d+(?:\.\d+)*m?)?"
+        r"|(?:ruby|lua|tclsh|rscript)(?:\d+(?:\.\d+)*)?"
+        r"|perl(?:\d+(?:\.\d+)*(?:-[a-z0-9_.+-]+)?)?"
+        r"|php(?:-cgi)?(?:\d+(?:\.\d+)*)?"
+        r"|node(?:js|\d+(?:\.\d+)*)?"
+        r"|luajit(?:-?\d+(?:\.\d+)*(?:-[a-z0-9_.+-]+)?)?",
+        name))
+
+
+def _shell_command_string(verb: str, args: list[str]) -> str | None:
+    """Return the string a supported shell will execute via `-c`, if any."""
+    if verb in {"csh", "tcsh"}:
+        # In csh/tcsh, -b and -n select the following word as a script file.
+        # Treating every later `c` in a short-option bundle as `-c` therefore
+        # produced false positives for `tcsh -b -c ...` and `tcsh -n -c ...`:
+        # those commands try to open a file literally named "-c".  -D carries
+        # an attached preprocessor definition whose value may also contain c.
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                return None
+            if arg == "-c":
+                return args[i + 1] if i + 1 < len(args) else None
+            if arg.startswith("-") and not arg.startswith("--"):
+                bundle = arg[1:]
+                if bundle.startswith("D"):
+                    i += 1
+                    continue
+                for option in bundle:
+                    if option in {"b", "n"}:
+                        return None
+                    if option == "c":
+                        return args[i + 1] if i + 1 < len(args) else None
+                i += 1
+                continue
+            return None
+        return None
+
+    if verb == "fish":
+        # fish uses getopt semantics: a required short-option argument may be
+        # attached (`-Cecho`) or separate (`-C echo`).  Parse the bundle in
+        # order so a `c` inside an attached value is never mistaken for -c.
+        value_short = {"C", "d", "f", "D", "o", "p"}
+        optional_short = {"I"}
+        value_long = {opt for opt in SHELL_VALUE_OPTS["fish"] if opt.startswith("--")}
+        optional_long = {"--install"}
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                return None
+            if arg in {"--command", "-c"}:
+                return args[i + 1] if i + 1 < len(args) else None
+            if arg.startswith("--command="):
+                return arg.split("=", 1)[1]
+            if arg in value_long:
+                i += 2
+                continue
+            if any(arg.startswith(opt + "=") for opt in value_long):
+                i += 1
+                continue
+            if arg in optional_long:
+                i += 1
+                continue
+            if any(arg.startswith(opt + "=") for opt in optional_long):
+                i += 1
+                continue
+            if arg.startswith("-") and not arg.startswith("--"):
+                bundle = arg[1:]
+                consumed_next = False
+                for pos, option in enumerate(bundle):
+                    if option == "c":
+                        attached = bundle[pos + 1:]
+                        return attached or (args[i + 1] if i + 1 < len(args) else None)
+                    if option in value_short:
+                        consumed_next = not bool(bundle[pos + 1:])
+                        break
+                    if option in optional_short:
+                        break
+                i += 2 if consumed_next else 1
+                continue
+            return None
+        return None
+
+    value_opts = SHELL_VALUE_OPTS.get(verb, set())
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return None
+        if arg in {"-c", "--command"}:
+            return args[i + 1] if i + 1 < len(args) else None
+        if arg.startswith("--command="):
+            return arg.split("=", 1)[1]
+        if arg in value_opts:
+            i += 2
+            continue
+        if any(arg.startswith(opt + "=") for opt in value_opts if opt.startswith("--")):
+            i += 1
+            continue
+        if any(arg.startswith(opt) and arg != opt for opt in value_opts
+               if len(opt) == 2 and opt[0] in "-+"):
+            i += 1
+            continue
+        if arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
+            return args[i + 1] if i + 1 < len(args) else None
+        if arg.startswith(("-", "+")):
+            i += 1
+            continue
+        return None
+    return None
+
+
+# shlex accumulates a token with `self.token = self.token + ch`, which is
+# quadratic in the length of a SINGLE token. A remote endpoint is allowed to
+# return up to engine._MAX_RESPONSE_BYTES, so one long unbroken line would sit
+# in check() for hours. Measured: 200k chars 0.75s, 400k 2.3s, 800k 10.8s.
+# No real command is anywhere near this, and truncating only ever hides
+# findings from the tail -- a rule that matches the visible prefix still fires.
+_MAX_COMMAND_CHARS = 4096
 
 
 def check(command: str) -> list[tuple[str, str]]:
@@ -664,7 +1326,8 @@ def check(command: str) -> list[tuple[str, str]]:
     """
     if not command or not command.strip():
         return []
-    clean = _strip_control(command)
+    command = command[:_MAX_COMMAND_CHARS]
+    clean = _normalize_shell_input(_strip_control(command))
     # Placeholders are documentation, not shell syntax: the `>` inside
     # `docker exec -it <container-id> sh` was once read as a redirect into /bin.
     scan = PLACEHOLDER_RE.sub("PLACEHOLDER", clean)
@@ -676,6 +1339,30 @@ def check(command: str) -> list[tuple[str, str]]:
     for pat, why in WHOLE_CAUTION:
         if pat.search(scan):
             findings.append(("CAUTION", why))
+
+    # Regexes correctly catch the common `curl | bash` spelling, but executable
+    # paths and wrappers are semantic no-ops: `| /bin/bash`, `| env bash`, and
+    # `| sudo /usr/bin/python3 -` execute the same bytes. Tokenize each top-level
+    # pipeline, strip those prefixes, and compare executable basenames.
+    for pipeline in _pipelines(scan):
+        commands = [_strip_command_prefixes(_tokenize(clause)) for clause in pipeline]
+        if any(toks and toks[0] == _UNPARSEABLE_ENV_SPLIT for toks in commands):
+            findings.append(("DANGER", "env -S string could not be safely parsed"))
+        if any(toks and toks[0] == _UNPARSEABLE_WRAPPER_OPTION for toks in commands):
+            findings.append(("DANGER", "abbreviated wrapper option could not be safely parsed"))
+        for i, toks in enumerate(commands[:-1]):
+            if not toks or _executable_name(toks[0]) not in {"curl", "wget"}:
+                continue
+            for downstream in commands[i + 1:]:
+                if not downstream:
+                    continue
+                interpreter = _executable_name(downstream[0])
+                if _is_code_interpreter(interpreter):
+                    why = ("pipes remote content straight into a shell"
+                           if interpreter in SHELL_RUNNERS
+                           else "pipes remote content straight into an interpreter")
+                    findings.append(("DANGER", why))
+                    break
 
     # `cd / && rm -rf *` is identical in effect to `rm -rf /`, but judging each
     # segment in isolation sees only a harmless-looking `rm -rf *`. Track a cd
@@ -695,39 +1382,14 @@ def check(command: str) -> list[tuple[str, str]]:
     cd_seen = False
 
     for seg in split_segments(scan):
-        toks = _tokenize(seg)
+        toks = _strip_command_prefixes(_tokenize(seg))
         if not toks:
             continue
-
-        # Strip no-op wrappers and env assignments, then basename the binary.
-        # Without this, `/bin/rm -rf /`, `sudo rm -rf /`, `env x=1 rm -rf /`,
-        # `nohup rm -rf /` and `nice rm -rf /` all passed clean while running rm.
-        while toks:
-            head = toks[0]
-            if ("=" in head and not head.startswith(("-", "/"))
-                    and head.split("=", 1)[0].isidentifier()):
-                toks = toks[1:]          # VAR=value prefix
-                continue
-            base = head.rsplit("/", 1)[-1]
-            if base in WRAPPERS:
-                toks = toks[1:]
-                # A second audit found stripping only the wrapper's NAME left
-                # its own option as the new head token -- `sudo -u root rm -rf /`,
-                # `env -i rm -rf /`, `nice -n 19 rm -rf /` all left `-u`/`-i`/`-n`
-                # unrecognized as a verb, so `rm` itself was never inspected.
-                # Consume the wrapper's own options too, including one that
-                # takes a SEPARATE value token (`-n 19`, but not `-n19`).
-                value_opts = WRAPPER_VALUE_OPTS.get(base, set())
-                while toks and toks[0] != "--" and toks[0].startswith("-"):
-                    opt = toks[0]
-                    toks = toks[1:]
-                    if opt in value_opts and toks and not toks[0].startswith("-"):
-                        toks = toks[1:]
-                if toks and toks[0] == "--":
-                    toks = toks[1:]
-                continue
-            break
-        if not toks:
+        if toks[0] == _UNPARSEABLE_ENV_SPLIT:
+            findings.append(("DANGER", "env -S string could not be safely parsed"))
+            continue
+        if toks[0] == _UNPARSEABLE_WRAPPER_OPTION:
+            findings.append(("DANGER", "abbreviated wrapper option could not be safely parsed"))
             continue
 
         # A command name produced by substitution (`$(echo rm) -rf /`) can
@@ -742,14 +1404,14 @@ def check(command: str) -> list[tuple[str, str]]:
                               " -- cannot verify what will run"))
             continue
 
-        verb = toks[0].rsplit("/", 1)[-1]
+        verb = _executable_name(toks[0])
 
         # `bash -c "<command>"` hides the whole command inside a string argument.
+        # Shells accept option bundles, so `bash -lc` and `sh -xc` carry the same
+        # command-string semantics as a standalone `-c`.
         if verb in SHELL_RUNNERS:
-            for i, t in enumerate(toks[1:], start=1):
-                if t == "-c" and i + 1 < len(toks):
-                    findings.extend(check(toks[i + 1]))
-                    break
+            if command_string := _shell_command_string(verb, toks[1:]):
+                findings.extend(check(command_string))
 
         # `eval STRING` is bash's other "run this text as a command" form.
         # Only the single-string case is handled -- `eval $(cmd)` builds the

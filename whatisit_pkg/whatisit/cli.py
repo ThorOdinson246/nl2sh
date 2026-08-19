@@ -129,7 +129,8 @@ def cmd_query(args, cfg: dict) -> int:
 
     try:
         cmds, elapsed, mode = engine.generate(
-            prompt, cfg, n=args.num, force_oneshot=args.oneshot, quiet=args.quiet)
+            prompt, cfg, n=args.num, force_oneshot=args.oneshot, quiet=args.quiet,
+            for_execution=args.execute or args.quiet)
     except FileNotFoundError as e:
         print(f"whatisit: {e}", file=sys.stderr)
         return 3

@@ -257,12 +257,13 @@ your way around a terminal well enough to spot a bad command and fix it.
 
 Every generated command is checked before it's printed. The checker flags
 recursive deletes of critical paths, writes to raw block devices, chmod and
-chown across system paths, fork bombs, curl piped into a shell, crontab wipes,
-firewall flushes, private key exposure, reverse shells, credential
-exfiltration, and the same patterns hidden behind `sudo`, `env`, `nohup`,
-quoting tricks or `..` traversal. Findings come back as `DANGER` (never
-auto-run) or `CAUTION` (warned, still yours to approve). 304 regression cases
-run in CI on Python 3.9 through 3.12.
+chown across system paths, fork bombs, remote content piped into a shell or
+interpreter, crontab wipes, firewall flushes, private key exposure, reverse
+shells, credential exfiltration, and the same patterns hidden behind `sudo`,
+`env`, `nohup`, quoting tricks or `..` traversal. Findings come back as
+`DANGER` (never auto-run) or `CAUTION` (warned, still yours to approve). 477
+regression cases run in CI on Python 3.9 through 3.13, on Linux, macOS and
+Windows.
 
 It's a denylist over a Turing-complete language, not a sandbox. Every rule in
 it came from a command this model actually produced during testing, which means

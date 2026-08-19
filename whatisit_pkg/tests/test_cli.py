@@ -95,7 +95,8 @@ class TestSubcommandRoutingIsFirstTokenOnly:
         # the first token.
         captured = {}
 
-        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False):
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
             captured["prompt"] = prompt
             return (["git config --list"], 0.01, "server")
 
@@ -114,7 +115,7 @@ class TestCmdQueryQuietDangerRefusal:
     def test_quiet_refuses_danger_command_exit_6(self, monkeypatch, capsys):
         monkeypatch.setattr(
             cli.engine, "generate",
-            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False, for_execution=False:
                 (["rm -rf /"], 0.01, "server"))
         rc = cli.main(["-q", "delete", "everything"])
         assert rc == 6
@@ -124,17 +125,39 @@ class TestCmdQueryQuietDangerRefusal:
         assert out.out == ""
 
     def test_quiet_prints_bare_command_on_success(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            cli.engine, "generate",
-            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
-                (["ls -la"], 0.01, "server"))
+        captured = {}
+
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
+            captured["for_execution"] = for_execution
+            return (["ls -la"], 0.01, "server")
+
+        monkeypatch.setattr(cli.engine, "generate", fake_generate)
         rc = cli.main(["-q", "list", "files"])
         assert rc == 0
+        assert captured["for_execution"] is True
         out = capsys.readouterr()
         assert out.out.strip() == "ls -la"
 
+    def test_execute_marks_generation_as_execution_intended(self, monkeypatch):
+        captured = {}
+
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
+            captured["for_execution"] = for_execution
+            return (["ls -la"], 0.01, "server")
+
+        monkeypatch.setattr(cli.engine, "generate", fake_generate)
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+        # -e is refused outright on Windows (exit 7) before the no-tty
+        # confirmation path (exit 6) is reached, so pin the platform.
+        monkeypatch.setattr(cli, "_is_windows", lambda: False)
+        assert cli.main(["-e", "list", "files"]) == 6
+        assert captured["for_execution"] is True
+
     def test_no_model_found_reports_and_exits_3(self, monkeypatch):
-        def raise_not_found(prompt, cfg, n=1, force_oneshot=False, quiet=False):
+        def raise_not_found(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                            for_execution=False):
             raise FileNotFoundError("no model found -- run `whatisit setup`")
         monkeypatch.setattr(cli.engine, "generate", raise_not_found)
         rc = cli.main(["do", "something"])
@@ -150,7 +173,7 @@ class TestCmdQueryQuietDangerRefusal:
         monkeypatch.setattr(cli, "_is_windows", lambda: True)
         monkeypatch.setattr(
             cli.engine, "generate",
-            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False, for_execution=False:
                 (["ls -la"], 0.01, "server"))
         rc = cli.main(["-e", "list", "files"])
         assert rc == 7
@@ -162,7 +185,7 @@ class TestCmdQueryQuietDangerRefusal:
         monkeypatch.setattr(cli, "_is_windows", lambda: False)
         monkeypatch.setattr(
             cli.engine, "generate",
-            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False:
+            lambda prompt, cfg, n=1, force_oneshot=False, quiet=False, for_execution=False:
                 (["ls -la"], 0.01, "server"))
         rc = cli.main(["-e", "list", "files"])
         assert rc != 7
@@ -260,7 +283,8 @@ class TestRemoteCli:
         monkeypatch.setenv("WHATISIT_OPENAI_BASE_URL", "http://192.0.2.8/v1")
         monkeypatch.setenv("WHATISIT_OPENAI_MODEL", "m")
 
-        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False):
+        def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                          for_execution=False):
             return (["ls"], 0.01, "remote")
 
         monkeypatch.setattr(cli.engine, "generate", fake_generate)
@@ -269,4 +293,3 @@ class TestRemoteCli:
         assert rc == 0
         assert captured.out.strip() == "ls"
         assert "leaves this machine" in captured.err
-
