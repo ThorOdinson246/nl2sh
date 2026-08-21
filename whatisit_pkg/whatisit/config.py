@@ -101,10 +101,13 @@ DEFAULTS = {
     "host_context": False,
     # OFF by default (opt-in). Keeps the full host-facts prompt block out of the
     # way of the shipped model's measured regression, while still fixing the
-    # wrong-distro failure: when on, install prompts are GBNF-constrained to the
-    # host package manager and every candidate command is regex-rewritten from
-    # foreign syntax as a backstop. Costs one short prefix-cached line. Enable
-    # if whatisit suggests `apt install` on Arch, `pacman -S` on Debian, etc.
+    # wrong-distro failure: when on, install prompts are GBNF-constrained to
+    # the host package manager on the local backends (llama-server /
+    # llama-cli), and every candidate command is regex-rewritten from foreign
+    # syntax as a backstop everywhere -- remote endpoints included, though they
+    # get no grammar field on the wire. Costs one short prefix-cached line.
+    # Enable if whatisit suggests `apt install` on Arch, `pacman -S` on Debian,
+    # etc.
     "distro_guidance": False,
     # GBNF grammar constraint for install prompts. When on (default) and the
     # host's package manager is known, the model is constrained to that manager's

@@ -123,9 +123,11 @@ whatisit config --set distro_guidance=true
 
 This is opt-in because the full host-context prompt block measured slightly
 worse on the benchmark for the bundled 1.5B model. Guidance costs one short
-prefix-cached sentence: install requests are constrained by a grammar to your
-package manager (`pacman -S`, `apt install`, `dnf install`, ...), and any
-foreign syntax that still slips through is rewritten to yours afterwards.
+prefix-cached sentence: on the local backends, install requests are constrained
+by a grammar to your package manager (`pacman -S`, `apt install`,
+`dnf install`, ...), and any foreign syntax that still slips through is
+rewritten to yours afterwards. Remote endpoints skip the grammar (not all of
+them accept the field) but keep the rewrite.
 Per-invocation: `whatisit --distro-guidance install docker`.
 
 ```bash
