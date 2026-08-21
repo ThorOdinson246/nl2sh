@@ -838,10 +838,14 @@ class TestPkgGuidanceLine:
         return {"pkg": pkg, "distro": "Arch Linux", "distro_version": "",
                 "arch": "x86_64", "shell": "zsh", "present": [], "missing": []}
 
-    def test_names_the_pkg_manager(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
-        line = hostctx.pkg_guidance_line(self._facts("pacman"))
-        assert "pacman" in line
+    def test_exact_constraint_text_for_pacman(self):
+        """The line joins the cached system prompt: pin its full wording so an
+        accidental edit cannot silently change what every host sends."""
+        expected = ("<constraint>\n"
+                    "This machine manages packages exclusively with pacman; "
+                    "install, update, and remove software only with pacman.\n"
+                    "</constraint>")
+        assert hostctx.pkg_guidance_line(self._facts("pacman")) == expected
 
     def test_unknown_pkg_returns_empty(self):
         assert hostctx.pkg_guidance_line(self._facts("unknown")) == ""
