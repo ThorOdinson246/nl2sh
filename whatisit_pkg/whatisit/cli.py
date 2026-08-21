@@ -122,6 +122,10 @@ def _emit_debug(prompt: str, system: str, user_msg: str, grammar: str | None) ->
         print(DIM(f"  --debug: GBNF grammar:\n{grammar}"), file=sys.stderr)
     print(DIM(f"  --debug: request:\n{prompt}"), file=sys.stderr)
 
+def _exec_cmd(cmd: str) -> int:
+    print(DIM(f"$ {cmd}"), file=sys.stderr)
+    shell = os.environ.get("SHELL", "/bin/bash")
+    return subprocess.run([shell, "-c", cmd]).returncode
 
 def cmd_query(args, cfg: dict) -> int:
     prompt = " ".join(args.words).strip()
@@ -225,7 +229,7 @@ def cmd_query(args, cfg: dict) -> int:
     if args.timing:
         print(DIM(f"  [{elapsed:.2f}s, {mode} mode]"), file=sys.stderr)
 
-    if not args.execute:
+    if not args.execute and not args.prefill_command:
         return 0
 
     if _is_windows():
@@ -261,6 +265,22 @@ def cmd_query(args, cfg: dict) -> int:
         print(DIM("Copy it and run it yourself if you are certain."), file=sys.stderr)
         return 6
 
+    if args.prefill_command or cfg.get("prefill_command", False):
+        # Windows machines have returned from cmd_query() by now and we can
+        # use `readline` which Python includes on Unix systems by default.
+        import readline
+
+        readline.set_startup_hook(lambda: readline.insert_text(chosen))
+        try:
+            chosen = input(f"{BOLD('Command to be executed (editable)')}:\n")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 130
+        finally:
+            # Clear the hook so it doesn't affect future inputs
+            readline.set_startup_hook()
+        return _exec_cmd(chosen)
+
     if cfg.get("confirm_execute", True):
         if not sys.stdin.isatty():
             print("whatisit: refusing to execute without an interactive confirmation.",
@@ -280,9 +300,7 @@ def cmd_query(args, cfg: dict) -> int:
             print("whatisit: not running.", file=sys.stderr)
             return 0
 
-    print(DIM(f"$ {chosen}"), file=sys.stderr)
-    shell = os.environ.get("SHELL", "/bin/bash")
-    return subprocess.run([shell, "-c", chosen]).returncode
+    return _exec_cmd(chosen)
 
 
 def _confirm(prompt: str, auto: bool) -> bool:
@@ -713,6 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="bypass the resident server (slower; for debugging)")
     ap.add_argument("-y", "--yes", action="store_true",
                     help="with -e, treat an empty confirm answer as yes ([Y/n])")
+    ap.add_argument("-p", "--prefill-command", dest="prefill_command", action="store_true",
+                    help="prefill the terminal with the command")
     ap.add_argument("--port", type=int, metavar="PORT",
                     help="fixed TCP port for the resident server (1-65535)")
     ap.add_argument("--threads", type=int, metavar="N",
@@ -762,7 +782,8 @@ def build_parser() -> argparse.ArgumentParser:
 SUBCOMMANDS = {"setup", "doctor", "stop", "config"}
 _FLAGS_NOARG = {"-e", "--execute", "-q", "--quiet", "-t", "--timing", "--oneshot",
                 "--host-context", "--no-host-context",
-                "--grammar", "--no-grammar", "--debug", "-y", "--yes"}
+                "--grammar", "--no-grammar", "--debug", "-y", "--yes",
+                "-p", "--prefill-command"}
 _FLAGS_ARG = {"-n", "--num"}
 _FLAGS_QUERY_ARG = {"--port", "--threads", "--ctx-size", "--model"}
 
@@ -785,7 +806,8 @@ class QueryArgs:
         self.num, self.execute, self.quiet = 1, False, False
         self.timing, self.oneshot = False, False
         self.port, self.threads, self.ctx_size, self.model = None, None, None, None
-        self.host_context, self.grammar, self.debug, self.yes = None, None, False, False
+        self.host_context, self.grammar, self.debug, self.yes = None, None, False, False,
+        self.prefill_command = False
         i = 0
         while i < len(argv):
             a = argv[i]
@@ -803,6 +825,8 @@ class QueryArgs:
                     self.grammar = False
                 elif a in ("-y", "--yes"):
                     self.yes = True
+                elif a in ("-p", "--prefill-command"):
+                    self.prefill_command = True
                 else:
                     setattr(self, {"-e": "execute", "--execute": "execute",
                                    "-q": "quiet", "--quiet": "quiet",
