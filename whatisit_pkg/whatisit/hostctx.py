@@ -467,7 +467,7 @@ root         ::= command ("\n" command)* "\n"?
 command      ::= sudo-install | install
 sudo-install ::= "sudo " install
 install      ::= "dnf install " pkg-name (" " pkg-name)*
-pkg-name     ::= [a-zA-Z0_9_.+-]+
+pkg-name     ::= [a-zA-Z0-9_.+-]+
 ''',
     "apk": r'''
 root         ::= command ("\n" command)* "\n"?
