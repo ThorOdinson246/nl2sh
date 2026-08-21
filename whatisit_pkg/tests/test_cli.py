@@ -426,7 +426,7 @@ class TestQueryFlagsApply:
 
     def test_debug_shows_grammar_when_available(self, monkeypatch, tmp_path, capsys):
         self._isolate(monkeypatch, tmp_path)
-        # distro_guidance is the new grammar gate; an install-intent prompt is
+        # distro_guidance is the grammar gate; an install-intent prompt is
         # required for the debug view to show a grammar, mirroring generate().
         cli.main(["config", "--set", "distro_guidance=true"])
         capsys.readouterr()
@@ -437,11 +437,11 @@ class TestQueryFlagsApply:
                             pkg_line=False: ("SYS", p))
         monkeypatch.setattr(cli.engine.hostctx, "stable_facts",
                             lambda *a, **k: {"pkg": "pacman"})
-        monkeypatch.setattr(cli.engine.hostctx, "grammar_for_pkg",
-                            lambda pkg: "grammar-blob", raising=False)
+        # The REAL pacman grammar must appear in the debug output -- a stub
+        # would pass even if gating picked up the wrong manager or none.
         rc = cli.main(["--debug", "install", "docker"])
         assert rc == 0
         err = capsys.readouterr().err
         assert "--debug" in err
-        assert "grammar-blob" in err
+        assert 'install      ::= "pacman -S "' in err
         assert "install docker" in err

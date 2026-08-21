@@ -149,8 +149,8 @@ def cmd_query(args, cfg: dict) -> int:
         # Show the exact prompt sent to the model and the active GBNF grammar
         # (if any). Intended for diagnosing why the 1.5B model misbehaves; goes
         # to stderr so `-q` output is unaffected. Mirrors generate()'s gating:
-        # the grammar needs distro_guidance OR host_context, plus use_grammar
-        # and an install-intent prompt.
+        # the grammar needs distro_guidance, use_grammar, and an install-intent
+        # prompt -- host_context alone does not send one.
         guidance_on = cfg.get("distro_guidance", False)
         context_on = cfg.get("host_context", True)
         system, user_msg = engine.hostctx.build(
@@ -159,7 +159,7 @@ def cmd_query(args, cfg: dict) -> int:
             pkg_line=guidance_on)
         pkg = "unknown"
         grammar = None
-        if (guidance_on or context_on) and cfg.get("use_grammar", True):
+        if guidance_on and cfg.get("use_grammar", True):
             try:
                 pkg = engine.hostctx.stable_facts().get("pkg", "unknown")
             except OSError:
