@@ -270,8 +270,10 @@ def cmd_query(args, cfg: dict) -> int:
         return 6
 
     if args.prefill_command or cfg.get("prefill_command", False):
-        # Windows machines have returned from cmd_query() by now and we can
-        # use `readline` which Python includes on Unix systems by default.
+        if _is_windows():
+            print("whatisit: -p/--prefill-command is not supported on Windows", file=sys.stderr)
+            return 9
+
         import readline
 
         readline.set_startup_hook(lambda: readline.insert_text(chosen))
