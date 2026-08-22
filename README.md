@@ -106,6 +106,18 @@ whatisit list files changed in the last week
 | `-n N` | show N alternative commands instead of one |
 | `-q`, `--quiet` | print only the bare command, for `$(...)` substitution |
 | `-t`, `--timing` | report how long generation took |
+| `--sleep-idle-seconds N` | stop the resident model server after N idle seconds, freeing its RAM (0 = never, default) |
+
+The resident server holds the model in RAM between queries so answers feel
+instant. On a memory-constrained box you can have it unload itself when idle:
+
+```bash
+whatisit --sleep-idle-seconds 300 show disk usage
+```
+
+The idle check is lazy: it runs at your next invocation, so a server that goes
+unused is stopped by the first query that arrives after the deadline (which
+then starts fresh). Persist it with `whatisit config --set sleep_idle_seconds=300`.
 
 Nothing runs unless you pass `-e` and confirm at the prompt. Anything flagged
 `DANGER` is never auto-run at all. See [Safety](#safety) for what gets flagged
