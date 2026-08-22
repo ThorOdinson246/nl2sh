@@ -1201,6 +1201,8 @@ class TestIdleStop:
                             lambda: (_ for _ in ()).throw(AssertionError("no stop")))
         assert engine.idle_stop(300) is False
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="chmod is a no-op on Windows")
     def test_touch_writes_private_timestamp_when_enabled(self, monkeypatch, tmp_path):
         self._isolate(monkeypatch, tmp_path)
         engine.touch_last_use(300)
@@ -1274,6 +1276,9 @@ class TestIdleUnloadThroughGenerate:
         assert not engine._last_use_path().exists()
 
     def test_oneshot_mode_does_not_write_timestamp(self, monkeypatch, tmp_path):
+        # Isolate the state dir: the assertion itself calls _last_use_path(),
+        # which must not probe (or mkdir) the real data dir in a sandbox.
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
         model = tmp_path / "model.gguf"
         model.write_bytes(b"fake")
         monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
