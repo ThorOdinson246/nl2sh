@@ -9,6 +9,7 @@ import os
 import socket
 import stat
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -1130,3 +1131,157 @@ class TestGenerateGrammarAndPostprocess:
         for flag in ("--file", "--system-prompt-file", "--grammar-file"):
             path = cmd[cmd.index(flag) + 1]
             assert not os.path.exists(path)
+
+
+# ------------------------------------------------------------- idle unload (#42)
+
+class TestIdleStop:
+    """--sleep-idle-seconds: lazy unload of the resident llama-server.
+
+    There is no daemon to watch the clock, so staleness is only discovered on
+    the next invocation; these tests pin down exactly when idle_stop() fires,
+    what it must ignore, and that touch_last_use() only writes while the
+    feature is enabled.
+    """
+
+    def _isolate(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+
+    def _seed_running_server(self, last_use_age):
+        sd = engine._state_dir()
+        (sd / "server.pid").write_text("12345\n")
+        if last_use_age is not None:
+            ts = time.time() - last_use_age
+            (sd / "server.last_use").write_text(f"{ts:.6f}\n")
+
+    def test_disabled_is_always_a_noop(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        self._seed_running_server(last_use_age=99999.0)
+        for disabled in (0, None, -5):
+            assert engine.idle_stop(disabled) is False
+            assert (engine._state_dir() / "server.pid").exists()
+
+    def test_stale_server_is_stopped(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        self._seed_running_server(last_use_age=301.0)
+        stopped = []
+        monkeypatch.setattr(engine, "stop_server", lambda: stopped.append(1) or True)
+        assert engine.idle_stop(300) is True
+        assert stopped == [1]
+
+    def test_fresh_server_is_kept(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        self._seed_running_server(last_use_age=10.0)
+        stopped = []
+        monkeypatch.setattr(engine, "stop_server", lambda: stopped.append(1))
+        assert engine.idle_stop(300) is False
+        assert stopped == []
+
+    def test_no_timestamp_means_no_stop(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        self._seed_running_server(last_use_age=None)
+        monkeypatch.setattr(engine, "stop_server",
+                            lambda: (_ for _ in ()).throw(AssertionError("no stop")))
+        assert engine.idle_stop(300) is False
+
+    def test_no_pid_file_means_no_stop(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        sd = engine._state_dir()
+        (sd / "server.last_use").write_text(f"{time.time() - 999:.6f}\n")
+        monkeypatch.setattr(engine, "stop_server",
+                            lambda: (_ for _ in ()).throw(AssertionError("no stop")))
+        assert engine.idle_stop(300) is False
+
+    def test_corrupt_timestamp_is_ignored_not_fatal(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        sd = engine._state_dir()
+        (sd / "server.pid").write_text("12345\n")
+        (sd / "server.last_use").write_text("not-a-number\n")
+        monkeypatch.setattr(engine, "stop_server",
+                            lambda: (_ for _ in ()).throw(AssertionError("no stop")))
+        assert engine.idle_stop(300) is False
+
+    def test_touch_writes_private_timestamp_when_enabled(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        engine.touch_last_use(300)
+        p = engine._last_use_path()
+        assert p.exists()
+        float(p.read_text())  # parses
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+    def test_touch_is_a_noop_when_disabled(self, monkeypatch, tmp_path):
+        self._isolate(monkeypatch, tmp_path)
+        engine.touch_last_use(0)
+        assert not engine._last_use_path().exists()
+
+
+class TestIdleUnloadThroughGenerate:
+    """generate() must consult the idle deadline BEFORE start_server()'s reuse
+    check and refresh the timestamp after a successful server query."""
+
+    def _fake_cfg_and_model(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
+        srv = tmp_path / "llama-server"
+        srv.write_bytes(b"fake")
+        monkeypatch.setenv("WHATISIT_LLAMA_SERVER", str(srv))
+
+    def _fake_hostctx_and_query(self, monkeypatch):
+        monkeypatch.setattr(engine, "hostctx", _FakeHostCtx())
+        monkeypatch.setattr(engine, "_query_server",
+                            lambda port, prompt, cfg, n, system=None, grammar=None:
+                                [("ls", "stop")])
+
+    def test_stale_server_stopped_before_start_and_touched_after(
+            self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        self._fake_hostctx_and_query(monkeypatch)
+        order = []
+        real_idle_stop = engine.idle_stop
+        monkeypatch.setattr(engine, "idle_stop",
+                            lambda secs: order.append(("idle_stop", secs))
+                            or real_idle_stop(secs))
+        monkeypatch.setattr(engine, "stop_server",
+                            lambda: order.append(("stop_server",)) or True)
+        monkeypatch.setattr(engine, "start_server",
+                            lambda *a, **kw: order.append(("start_server",)) or 12345)
+
+        sd = engine._state_dir()
+        (sd / "server.pid").write_text("12345\n")
+        (sd / "server.last_use").write_text(f"{time.time() - 400:.6f}\n")
+
+        _, _, mode = engine.generate("list files", {"sleep_idle_seconds": 300})
+        assert mode == "server"
+        # The stale server was stopped, and the idle check ran before
+        # start_server could reuse anything.
+        assert ("stop_server",) in order
+        assert order.index(("idle_stop", 300)) < order.index(("start_server",))
+        # The query refreshed the timestamp: it is now newer than the stale one.
+        assert float((sd / "server.last_use").read_text()) > time.time() - 30
+
+    def test_feature_off_never_touches_state(self, monkeypatch, tmp_path):
+        self._fake_cfg_and_model(monkeypatch, tmp_path)
+        self._fake_hostctx_and_query(monkeypatch)
+        called = []
+        monkeypatch.setattr(engine, "idle_stop",
+                            lambda secs: called.append(secs))
+        monkeypatch.setattr(engine, "start_server", lambda *a, **kw: 12345)
+        engine.generate("list files", {})
+        # generate() still calls idle_stop, but with the default of 0, which
+        # must be a complete no-op: nothing read, nothing written.
+        assert not engine._last_use_path().exists()
+
+    def test_oneshot_mode_does_not_write_timestamp(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"fake")
+        monkeypatch.setattr(cfg_mod, "find_model", lambda: model)
+        monkeypatch.setattr(engine, "hostctx", _FakeHostCtx())
+        monkeypatch.setattr(cfg_mod, "find_llama_cli", lambda: tmp_path / "llama-cli")
+        monkeypatch.setattr(engine, "_query_oneshot",
+                            lambda model, cli_bin, prompt, cfg, threads,
+                                   system=None, grammar=None, ctx_size=2048:
+                                [("ls", None)])
+        engine.generate("list files", {"sleep_idle_seconds": 300}, force_oneshot=True)
+        assert not engine._last_use_path().exists()
