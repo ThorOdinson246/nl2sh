@@ -444,3 +444,61 @@ class TestQueryFlagsApply:
         assert "--debug" in err
         assert "grammar-blob" in err
         assert "list files" in err
+
+
+# ------------------------------------------------------- --sleep-idle-seconds (#42)
+
+def test_sleep_idle_seconds_flag_parse():
+    a = cli.QueryArgs(["--sleep-idle-seconds", "300", "list", "files"])
+    assert a.sleep_idle_seconds == 300
+    assert a.words == ["list", "files"]
+
+
+def test_sleep_idle_seconds_defaults_to_none():
+    assert cli.QueryArgs(["list", "files"]).sleep_idle_seconds is None
+
+
+def test_sleep_idle_seconds_needs_value():
+    with pytest.raises(ValueError):
+        cli.QueryArgs(["--sleep-idle-seconds"])
+
+
+def test_sleep_idle_seconds_range_is_validated():
+    with pytest.raises(ValueError, match=">= 0"):
+        cli.QueryArgs(["--sleep-idle-seconds", "-1", "list", "files"])
+    assert cli.QueryArgs(["--sleep-idle-seconds", "0",
+                          "list", "files"]).sleep_idle_seconds == 0
+
+
+def test_sleep_idle_seconds_is_flagged_when_stray():
+    a = cli.QueryArgs(["list", "files", "--sleep-idle-seconds", "300"])
+    assert a.sleep_idle_seconds is None
+    assert a.stray_flags == ["--sleep-idle-seconds"]
+
+
+def test_sleep_idle_seconds_overrides_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+    seen = {}
+    def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                      for_execution=False):
+        seen["cfg"] = dict(cfg)
+        return (["ls"], 0.01, "server")
+    monkeypatch.setattr(cli.engine, "generate", fake_generate)
+    rc = cli.main(["--sleep-idle-seconds", "300", "list", "files"])
+    assert rc == 0
+    assert seen["cfg"]["sleep_idle_seconds"] == 300
+
+
+def test_sleep_idle_seconds_absent_leaves_config_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("WHATISIT_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("WHATISIT_DATA_DIR", str(tmp_path / "data"))
+    seen = {}
+    def fake_generate(prompt, cfg, n=1, force_oneshot=False, quiet=False,
+                      for_execution=False):
+        seen["cfg"] = dict(cfg)
+        return (["ls"], 0.01, "server")
+    monkeypatch.setattr(cli.engine, "generate", fake_generate)
+    cli.main(["list", "files"])
+    # The default comes from DEFAULTS (0 = never unload), not from the flag.
+    assert seen["cfg"]["sleep_idle_seconds"] == 0

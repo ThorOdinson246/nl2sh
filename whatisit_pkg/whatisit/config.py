@@ -110,6 +110,10 @@ DEFAULTS = {
     "force_tcp": False,
     "server_port": None,       # fixed TCP port for the resident server
     "ctx_size": 2048,          # context size passed to llama-server/llama-cli
+    # 0 => never auto-unload. When > 0, a resident llama-server that has been
+    # idle longer than this many seconds is stopped by the next invocation,
+    # freeing its RAM. See engine.idle_stop().
+    "sleep_idle_seconds": 0,
 }
 
 

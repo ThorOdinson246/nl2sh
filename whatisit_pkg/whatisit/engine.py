@@ -487,6 +487,53 @@ def _read_params() -> dict | None:
         return None
 
 
+def _last_use_path() -> Path:
+    return _state_dir() / "server.last_use"
+
+
+def touch_last_use(sleep_idle_seconds) -> None:
+    """Record now as the server's last use, but only when idle unload is on.
+
+    Called after a successful server-mode query. When the feature is off
+    (sleep_idle_seconds <= 0) nothing is written, so the file never exists and
+    the idle check below is a no-op -- the default behaviour is unchanged.
+    """
+    if not sleep_idle_seconds or sleep_idle_seconds <= 0:
+        return
+    try:
+        _write_private(_last_use_path(), f"{time.time():.6f}\n")
+    except OSError:
+        pass  # a missing timestamp only means the model stays loaded longer
+
+
+def idle_stop(sleep_idle_seconds) -> bool:
+    """Stop a resident server that has been idle past its deadline.
+
+    llama-server has no native idle timeout and this tool deliberately keeps
+    no daemon of its own, so staleness can only be discovered lazily: the next
+    invocation compares the wall clock against the last-use timestamp and
+    SIGTERMs the server via stop_server() before starting a fresh one. The
+    practical consequence: the model stays resident until the first query that
+    arrives AFTER the deadline, not unloaded at exactly N seconds. That trade
+    buys zero background processes and no new failure modes.
+
+    Returns True when a stale server was actually stopped.
+    """
+    if not sleep_idle_seconds or sleep_idle_seconds <= 0:
+        return False
+    sd = _state_dir()
+    p = _last_use_path()
+    if not (sd / "server.pid").exists() or not p.exists():
+        return False
+    try:
+        last = float(p.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if time.time() - last < sleep_idle_seconds:
+        return False
+    return stop_server()
+
+
 def start_server(model: Path, server_bin: Path, threads: int,
                  wait: float = 180.0, quiet: bool = False,
                  port: int | None = None, ctx_size: int = 2048) -> int:
@@ -1024,10 +1071,16 @@ def generate(prompt: str, cfg: dict, n: int = 1, force_oneshot: bool = False,
 
     t0 = time.time()
     if server_bin is not None:
+        # Lazy idle unload: before the reuse check inside start_server(), drop
+        # a resident server that has been idle past --sleep-idle-seconds.
+        # stop_server() clears pid/params/socket, so start_server() below sees
+        # no live server and launches a fresh one.
+        idle_stop(cfg.get("sleep_idle_seconds", 0))
         port = start_server(model, server_bin, threads, quiet=quiet,
                             port=cfg.get("server_port"),
                             ctx_size=cfg.get("ctx_size", 2048))
         raws = _query_server(port, user_msg, cfg, n, system=system, grammar=grammar)
+        touch_last_use(cfg.get("sleep_idle_seconds", 0))
         mode = "server"
     else:
         cli = cfg_mod.find_llama_cli()
