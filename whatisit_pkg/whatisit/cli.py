@@ -270,6 +270,8 @@ def cmd_query(args, cfg: dict) -> int:
         return 6
 
     if args.prefill_command or cfg.get("prefill_command", False):
+        if not sys.stdin.isatty():
+            print("whatisit: -p/--prefill-command is not supported with TTY", file=sys.stderr)
         if _is_windows():
             print("whatisit: -p/--prefill-command is not supported on Windows", file=sys.stderr)
             return 9
