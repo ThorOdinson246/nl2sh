@@ -125,7 +125,11 @@ def _emit_debug(prompt: str, system: str, user_msg: str, grammar: str | None) ->
 def _exec_cmd(cmd: str) -> int:
     print(DIM(f"$ {cmd}"), file=sys.stderr)
     shell = os.environ.get("SHELL", "/bin/bash")
-    return subprocess.run([shell, "-c", cmd]).returncode
+    try:
+        return subprocess.run([shell, "-c", cmd]).returncode
+    except FileNotFoundError:
+        print(f"whatisit: the shell '{shell}' was not found")
+        return 8
 
 def cmd_query(args, cfg: dict) -> int:
     prompt = " ".join(args.words).strip()
